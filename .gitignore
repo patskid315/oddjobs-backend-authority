@@ -9,3 +9,4 @@ firestore-debug*.log
 production-baseline/raw/
 *.zip
 .DS_Store
+release-artifacts/
