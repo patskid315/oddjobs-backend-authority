@@ -1,0 +1,26 @@
+{
+  "name": "oddjobs-backend-authority",
+  "main": "index.js",
+  "private": true,
+  "version": "0.0.0-gate4",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "test:unit": "node --test test/*.test.js",
+    "test:emulator": "firebase --config ../firebase.emulator.json emulators:exec --project oddjobs-gate5-test --only firestore 'node --test test-emulator/*.test.js'",
+    "test:rollback": "node ../scripts/rollback-drill.js",
+    "test:stripe": "node --test test-stripe/*.test.js",
+    "verify:release": "node ../scripts/verify-release-guards.js"
+  },
+  "dependencies": {
+    "firebase-admin": "13.10.0",
+    "firebase-functions": "6.6.0",
+    "stripe": "22.6.2"
+  },
+  "devDependencies": {
+    "@firebase/rules-unit-testing": "5.0.2",
+    "firebase-tools": "15.30.0"
+  }
+}
