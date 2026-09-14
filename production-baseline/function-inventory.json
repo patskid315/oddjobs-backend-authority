@@ -1,0 +1,10 @@
+{
+  "project": "theoddjobsappnewyork",
+  "region": "us-central1",
+  "generation": 1,
+  "expectedCount": 45,
+  "functions": [
+    "createAccountLink", "createConnectedAccount", "createDashboardLink", "createEphemeralKey", "createPaymentIntent", "createSetupIntent", "createStripeCustomerOnSignup", "decideWaitlistOnProfileSetup", "detachPaymentMethod", "fetchEligibleWorkers", "finalizeNYCOnboarding", "getAdminActivity", "getAdminAlerts", "getDefaultPaymentMethod", "getJobs", "getPayments", "getStripeBalance", "getUsers", "getWithdrawals", "listPaymentMethods", "observeFirestoreNotifications", "observeJobComments", "observeJobPosts", "onAddressUpdateRequestAdminActivity", "onAddressUpdateRequestUpdatedAdminActivity", "onAdminAlertCreatedDiscord", "onJobCompleted_createConnection", "onJobPostUpdatedAdminActivity", "onJobPostedAdminActivity", "onJobRequestAdminActivity", "onPaymentCreatedAdminActivity", "onPaymentUpdatedAdminActivity", "onUserCreatedAdminActivity", "onVerificationIdRequestAdminActivity", "onVerificationIdRequestUpdatedAdminActivity", "onWithdrawalCreatedAdminActivity", "onWithdrawalUpdatedAdminActivity", "releasePaymentOnCompletion", "releaseResearchPaymentOnSlotCompletion", "retryPendingPayouts", "searchUsers", "sendReferral", "sendReferralEmail", "updateWorkerStatsOnSignup", "updateWorkerStatsOnStatusChange"
+  ],
+  "intentionalEmergencyDeployTargets": ["releasePaymentOnCompletion"]
+}

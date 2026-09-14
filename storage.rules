@@ -1,0 +1,56 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // ✅ Verification Images: Only the user can upload and read their own verification images
+    match /verification_images/{userId}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.uid == userId;
+      allow read: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /verificationID/{fileName} {
+      allow read, write: if request.auth != null &&
+                         fileName.matches('^' + request.auth.uid + '_(front|back)\\.jpg$');
+    }
+
+    // ✅ Job Completion Photos (STANDARD): jobCompletionPhotos/{jobID}/{workerID}/...
+    match /jobCompletionPhotos/{jobID}/{workerID}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.uid == workerID;
+      allow read: if true; // Optional: Public read access
+    }
+
+    // ✅ Job Completion Photos (RESEARCH/SLOT): jobCompletionPhotos/{jobID}/slots/{slotId}/{workerID}/...
+    match /jobCompletionPhotos/{jobID}/slots/{slotId}/{workerID}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.uid == workerID;
+      allow read: if true; // Optional: Public read access
+    }
+
+    // ✅ Job Post Images (Allow Authenticated Users to Upload & Read)
+    match /jobPostImages/{allPaths=**} {
+      allow write: if request.auth != null;
+      allow read: if true;
+    }
+    
+        // Job post draft images
+    match /job_post_drafts/{uid}/{draftId}/{fileName} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+    
+       // ✅ Research post draft images (RESEARCH drafts)
+    match /research_post_drafts/{uid}/{draftId}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Optional: allow nested paths too (if you ever add folders)
+    match /job_post_drafts/{uid}/{draftId}/{allPaths=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // ✅ User Profile Images (Each user can read/write their own image)
+    match /profile_images/{userId}/{allPaths=**} {
+      allow write: if request.auth != null && request.auth.uid == userId;
+      allow read: if true;
+    }
+  }
+}
+

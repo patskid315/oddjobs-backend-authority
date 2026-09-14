@@ -1,0 +1,11 @@
+.runtimeconfig.json
+.env
+.env.*
+!.env.example
+node_modules/
+coverage/
+firebase-debug*.log
+production-baseline/raw/
+*.zip
+.DS_Store
+
