@@ -1,0 +1,21 @@
+"use strict";
+const fs=require("node:fs"),path=require("node:path"),cp=require("node:child_process");const root=path.resolve(__dirname,"..");
+const required=["firestore.rules","firestore.emergency.rules","storage.rules","firestore.indexes.json","firebase.json","production-baseline/MANIFEST.md","production-baseline/function-inventory.json","production-baseline/source-digests.json","functions/package-lock.json","docs/RELEASE_METADATA_SCHEMA.json"];
+const errors=[];for(const f of required)if(!fs.existsSync(path.join(root,f)))errors.push(`missing ${f}`);
+const tracked=(()=>{try{return cp.execFileSync("git",["ls-files"],{cwd:root,encoding:"utf8"}).split("\n");}catch{return[];}})();
+for(const f of tracked)if(/(^|\/)(\.runtimeconfig\.json|\.env($|\.)|.*secret.*\.json$)/i.test(f))errors.push(`secret-like file tracked: ${f}`);
+function walk(dir){for(const entry of fs.readdirSync(dir,{withFileTypes:true})){if([".git","node_modules"].includes(entry.name))continue;const p=path.join(dir,entry.name);if(entry.isDirectory())walk(p);else{const rel=path.relative(root,p);if(/(^|\/)(\.runtimeconfig\.json|\.env($|\.)|.*secret.*\.json$|.*\.zip$)/i.test(rel))errors.push(`secret/archive candidate present: ${rel}`);if(fs.statSync(p).size<2_000_000){const body=fs.readFileSync(p,"utf8");if(/(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,}|-----BEGIN (?:RSA |EC |)PRIVATE KEY-----/.test(body))errors.push(`credential material detected: ${rel}`);}}}}walk(root);
+const transfer=fs.readFileSync(path.join(root,"functions/src/settlement/stripeTransferService.js"),"utf8");if(!transfer.includes("idempotencyKey"))errors.push("Stripe transfer omits idempotency key");
+const completion=fs.readFileSync(path.join(root,"functions/index.js"),"utf8");if(/transfers\.create/.test(completion))errors.push("completion trigger contains direct Stripe transfer");
+const inventory=JSON.parse(fs.readFileSync(path.join(root,"production-baseline/function-inventory.json"),"utf8"));
+if(inventory.expectedCount!==45||inventory.functions.length!==45||new Set(inventory.functions).size!==45)errors.push("production Function inventory differs from the verified 45-function baseline");
+if(JSON.stringify(inventory.intentionalEmergencyDeployTargets)!==JSON.stringify(["releasePaymentOnCompletion"]))errors.push("emergency deploy target drift");
+if(!completion.includes("exports.releasePaymentOnCompletion"))errors.push("emergency target export missing");
+const candidateExports=[...completion.matchAll(/exports\.([A-Za-z0-9_]+)\s*=/g)].map(m=>m[1]);if(JSON.stringify(candidateExports)!==JSON.stringify(["releasePaymentOnCompletion"]))errors.push(`unexpected candidate exports: ${candidateExports.join(",")}`);
+if(/require\(["']\.\/src\/settlement\/executor["']\)/.test(completion)||/SETTLEMENT_EXECUTOR_ENABLED/.test(completion))errors.push("guarded executor is reachable from emergency entry point");
+const crypto=require("node:crypto");const digest=v=>crypto.createHash("sha256").update(v).digest("hex");
+const baseline=JSON.parse(fs.readFileSync(path.join(root,"production-baseline/source-digests.json"),"utf8"));for(const [file,expected] of Object.entries(baseline.files)){const p=path.join(root,"production-baseline/functions",file);if(!fs.existsSync(p)||digest(fs.readFileSync(p))!==expected)errors.push(`recovered baseline digest mismatch: ${file}`);}
+for(const [file,expected] of Object.entries({"firestore.rules":"326738f1d43732f506bafc174bb266d5adcd8d9f7502e660ee24b940bd30c96b","storage.rules":"d8441aa6a21330dee819eefc32e4ae6ac6ef2e89360f9b0814ce50d071c6c014","firestore.indexes.json":"564f8cb27ae160d083c12ed684422a635eb66e53fb09ffee0c8c17d594fd3a4f"}))if(digest(fs.readFileSync(path.join(root,file)))!==expected)errors.push(`authority digest mismatch: ${file}`);
+if(!process.argv.includes("--allow-dirty")){const dirty=cp.execFileSync("git",["status","--porcelain"],{cwd:root,encoding:"utf8"});if(dirty)errors.push("release source is dirty or untracked");}
+for(const name of ["GIT_SHA","BUILD_ID","SOURCE_DIGEST","RULES_DIGEST","INDEXES_DIGEST","DEPLOYMENT_TIMESTAMP","OPERATOR","ENVIRONMENT"])if(!fs.readFileSync(path.join(root,"docs/RELEASE_METADATA_SCHEMA.json"),"utf8").includes(name))errors.push(`release metadata missing ${name}`);
+if(errors.length){console.error(errors.join("\n"));process.exit(1);}console.log("RELEASE_GUARDS_OK");

@@ -1,0 +1,26 @@
+name: verify
+on: [pull_request, workflow_dispatch]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --prefix functions
+      - run: npm test --prefix functions
+      - run: npm run test:emulator --prefix functions
+      - run: npm run test:rollback --prefix functions
+      - run: npm run verify:release --prefix functions
+  stripe-test-mode:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: stripe-test-mode
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm ci --prefix functions
+      - run: npm run test:stripe --prefix functions
+        env:
+          STRIPE_TEST_SECRET_KEY: ${{ secrets.STRIPE_TEST_SECRET_KEY }}

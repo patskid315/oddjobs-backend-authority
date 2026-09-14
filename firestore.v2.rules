@@ -1,0 +1,334 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null && request.auth.uid != null;
+    }
+
+
+    function isTruthy(v) { return v == true || v == 1; }
+
+    function isNYCOnboarded() {
+      return isSignedIn()
+        && request.auth.token.region == "nyc"
+        && isTruthy(request.auth.token.onboarded);
+    }
+
+    function isNYCAuthorized() {
+      return isNYCOnboarded()
+        && !isTruthy(request.auth.token.waitlist);
+    }
+
+    // ---------- Connections (poster <-> worker history) ----------
+    match /connections/{connectionId} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.posterId
+            || request.auth.uid == resource.data.workerId);
+
+      allow create, update, delete: if false;
+    }
+
+    // ---------- Job helpers ----------
+    function jobDoc(jobID) {
+      return get(/databases/$(database)/documents/jobPost/$(jobID));
+    }
+
+    function isJobPoster(jobID) {
+      return isSignedIn() && request.auth.uid == jobDoc(jobID).data.userId;
+    }
+
+    function isAssignedWorker(jobID) {
+      return isSignedIn() && request.auth.uid == jobDoc(jobID).data.assignedWorkerID;
+    }
+
+    function isResearchJob(jobID) {
+      let d = jobDoc(jobID).data;
+      return (("participantTarget" in d) && d.participantTarget > 0)
+          || (("payPerParticipantCents" in d) && d.payPerParticipantCents > 0)
+          || (("totalPerParticipantCents" in d) && d.totalPerParticipantCents > 0);
+    }
+
+    function workerAllowedJobPostKeys() {
+      return [
+        "progressStatus",
+        "startDate",
+        "completionPhotos",
+        "completionDuration",
+        "completionDate"
+      ];
+    }
+
+    function workerChangedOnlyAllowedJobPostKeys() {
+      return request.resource.data
+        .diff(resource.data)
+        .changedKeys()
+        .hasOnly(workerAllowedJobPostKeys());
+    }
+
+    function workerJobPostTypesOk() {
+      return
+        (!("completionPhotos" in request.resource.data) || request.resource.data.completionPhotos is list) &&
+        (!("completionDuration" in request.resource.data) || request.resource.data.completionDuration is string) &&
+        (!("completionDate" in request.resource.data) || request.resource.data.completionDate is timestamp) &&
+        (!("startDate" in request.resource.data) || request.resource.data.startDate is timestamp) &&
+        (!("progressStatus" in request.resource.data) || request.resource.data.progressStatus is string);
+    }
+
+    function workerAllowedSlotKeys() {
+      return [
+        "status",
+        "startDate",
+        "workerSubmittedAt",
+        "workerCompletionSubmitted",
+        "completionPhotos",
+        "completionDuration",
+        "completionDate"
+      ];
+    }
+
+    function workerChangedOnlyAllowedSlotKeys() {
+      return request.resource.data
+        .diff(resource.data)
+        .changedKeys()
+        .hasOnly(workerAllowedSlotKeys());
+    }
+
+    function workerSlotTypesOk() {
+      return
+        (!("status" in request.resource.data) || request.resource.data.status is string) &&
+        (!("startDate" in request.resource.data) || request.resource.data.startDate is timestamp) &&
+        (!("completionPhotos" in request.resource.data) || request.resource.data.completionPhotos is list) &&
+        (!("completionDuration" in request.resource.data) || request.resource.data.completionDuration is string) &&
+        (!("completionDate" in request.resource.data) || request.resource.data.completionDate is timestamp) &&
+        (!("workerSubmittedAt" in request.resource.data) || request.resource.data.workerSubmittedAt is timestamp) &&
+        (!("workerCompletionSubmitted" in request.resource.data) || request.resource.data.workerCompletionSubmitted is bool);
+    }
+
+    function isAcceptedSlotWorker() {
+      return isSignedIn() && request.auth.uid == resource.data.acceptedWorkerId;
+    }
+
+match /payout_pending_jobs/{docId} {
+  allow get: if isSignedIn() && resource.data.recipientId == request.auth.uid;
+  allow list: if false;
+  allow write: if false;
+}
+
+match /payments/{paymentID} {
+  allow create: if false;
+
+  allow read: if isSignedIn()
+    && (request.auth.uid == resource.data.senderId
+        || request.auth.uid == resource.data.recipientId);
+
+  allow update: if false;
+
+  allow list: if false;
+  allow delete: if false;
+}
+
+match /conversations/{conversationID}/messages/{messageID} {
+  allow read, write: if isSignedIn()
+    && request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationID)).data.participants;
+}
+
+    match /users/{userId}/meta/{docId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /stripe_customers/{userId} {
+      allow read: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /updateAddress_requests/{docId} {
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+    }
+
+    match /updateVerificationID_requests/{requestId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid
+        && (request.resource.data.type is string)
+        && (request.resource.data.timestamp is timestamp)
+        && (request.resource.data.newValue is map);
+
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /job_post_events/{eventId} {
+      allow create: if isSignedIn();
+      allow read, update, delete: if false;
+    }
+
+    match /research_post_drafts/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /withdraws/{withdrawId} {
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update: if false;
+      allow read:   if isSignedIn() && request.auth.uid == resource.data.userId;
+    }
+
+    match /reviews/{userID}/userReviews/{reviewID} {
+      allow read, create: if isSignedIn();
+      allow update, delete: if false;
+    }
+
+    match /job_post_drafts/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    match /balance/{userID} {
+      allow read: if isSignedIn() && request.auth.uid == userID;
+
+      allow write: if false;
+    }
+
+    match /users/{userID} {
+      allow read: if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userID;
+
+      allow update: if isSignedIn()
+        && request.auth.uid == userID
+        && (
+          (request.resource.data.keys().hasAny(['accountStatus'])
+            && request.resource.data.accountStatus == 'deleted')
+          ||
+          !(
+            (request.resource.data.keys().hasAny(['accountStatus'])
+               && request.resource.data.accountStatus != resource.data.accountStatus)
+            ||
+            (request.resource.data.keys().hasAny(['verificationStatus'])
+               && request.resource.data.verificationStatus != resource.data.verificationStatus)
+          )
+        );
+
+      match /verify/{documentId} {
+        allow write: if isSignedIn() && request.auth.uid == userID;
+        allow read:  if isSignedIn() && request.auth.uid == userID;
+      }
+    }
+
+    match /reviews/{reviewID} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.jobPosterID
+            || request.auth.uid == resource.data.workerID);
+      allow write, update, delete: if false;
+    }
+
+    // ---------- Promo Codes ----------
+  match /promoCodes/{promoCode} {
+  allow read: if isSignedIn();
+  allow create, update, delete: if false;
+}
+
+    // ---------- Job Posts ----------
+    match /jobPost/{jobID} {
+      allow get, list: if true;
+
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+
+      allow update: if isSignedIn() && (
+        request.auth.uid == resource.data.userId
+        || (
+          !isResearchJob(jobID)
+          && isAssignedWorker(jobID)
+          && workerChangedOnlyAllowedJobPostKeys()
+          && workerJobPostTypesOk()
+        )
+      );
+
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.userId;
+
+      match /comments/{commentId} {
+        allow read: if true;
+
+        allow create: if isSignedIn()
+          && request.resource.data.authorId == request.auth.uid
+          && request.resource.data.jobId == jobID;
+
+        allow delete: if isSignedIn()
+          && resource.data.authorId == request.auth.uid;
+
+        allow update: if false;
+      }
+
+      match /commenters/{userId} {
+        allow read: if true;
+
+        allow create, update: if isSignedIn()
+          && request.auth.uid == userId;
+
+        allow delete: if false;
+      }
+
+      match /slots/{slotID} {
+        allow get, list: if isSignedIn()
+          && (
+            request.auth.uid == jobDoc(jobID).data.userId
+            || request.auth.uid == resource.data.acceptedWorkerId
+          );
+
+        allow create, update, delete: if isNYCAuthorized()
+          && request.auth.uid == jobDoc(jobID).data.userId;
+
+        allow update: if isSignedIn()
+          && isAcceptedSlotWorker()
+          && workerChangedOnlyAllowedSlotKeys()
+          && workerSlotTypesOk();
+      }
+    }
+
+    // ---------- Job Requests (NYC gated) ----------
+    match /jobRequests/{requestID} {
+      allow read: if isSignedIn()
+        && (request.auth.uid == resource.data.senderID
+            || request.auth.uid == resource.data.receiverID);
+
+      allow create: if isNYCAuthorized()
+        && request.auth.uid == request.resource.data.senderID;
+
+      allow update: if isNYCAuthorized()
+        && (request.auth.uid == resource.data.senderID
+            || request.auth.uid == resource.data.receiverID);
+    }
+
+    match /notifications/{notificationID} {
+      allow write: if isSignedIn();
+      allow read:  if isSignedIn() && request.auth.uid == resource.data.receiverID;
+    }
+
+    match /workers/{workerID}/jobsInProgress/{jobID} {
+      allow read, write: if isSignedIn() && request.auth.uid == workerID;
+    }
+
+    match /workers/{workerID}/completedJobs/{jobID} {
+      allow read, write: if isSignedIn() && request.auth.uid == workerID;
+    }
+
+    match /jobImages/{allPaths=**} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    match /profile_images/{userID}/{allPaths=**} {
+      allow read: if true;
+      allow write: if isSignedIn() && request.auth.uid == userID;
+    }
+
+    // Emergency additive boundary: no client may read or write settlement/audit state.
+    match /settlements/{settlementId} { allow read, write: if false; }
+    match /paymentAuditEvents/{eventId} { allow read, write: if false; }
+    match /settlementIssues/{issueId} { allow read, write: if false; }
+    match /stripeEvents/{eventId} { allow read, write: if false; }
+
+    // Future V2 financial authority. Clients use commands, never these records.
+    match /ledger/{entryId} { allow read, write: if false; }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

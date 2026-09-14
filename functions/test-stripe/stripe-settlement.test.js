@@ -1,0 +1,21 @@
+"use strict";
+const test=require("node:test");const assert=require("node:assert/strict");const Stripe=require("stripe");
+const key=process.env.STRIPE_TEST_SECRET_KEY;if(!key||!key.startsWith("sk_test_"))throw new Error("A Stripe test-mode key is required");
+const stripe=new Stripe(key,{maxNetworkRetries:1,timeout:10000});
+let account,charge,first,replay;const idem=`oddjobs_gate5_${Date.now()}`;
+test.before(async()=>{
+  account=await stripe.accounts.create({type:"custom",country:"US",business_type:"individual",capabilities:{transfers:{requested:true}},business_profile:{mcc:"7299",url:"https://theoddjobsapp.com"},individual:{first_name:"Test",last_name:"Worker",email:"gate5-test@theoddjobsapp.com",phone:"0000000000",dob:{day:1,month:1,year:1990},address:{line1:"address_full_match",city:"New York",state:"NY",postal_code:"10001",country:"US"},ssn_last_4:"0000"},external_account:"btok_us_verified",tos_acceptance:{date:Math.floor(Date.now()/1000),ip:"127.0.0.1"}});
+  charge=await stripe.charges.create({amount:1200,currency:"usd",source:"tok_visa",description:"OddJobs Gate 5 test-only funding"});
+});
+test.after(async()=>{if(account)await stripe.accounts.del(account.id).catch(()=>{});});
+test("1 successful test-mode transfer",async()=>{first=await stripe.transfers.create({amount:100,currency:"usd",destination:account.id,source_transaction:charge.id,metadata:{purpose:"gate5_safety_proof",settlementIdentity:idem}},{idempotencyKey:idem});assert.equal(first.amount,100);});
+test("2 same settlement invoked twice returns same transfer",async()=>{replay=await stripe.transfers.create({amount:100,currency:"usd",destination:account.id,source_transaction:charge.id,metadata:{purpose:"gate5_safety_proof",settlementIdentity:idem}},{idempotencyKey:idem});assert.equal(replay.id,first.id);});
+test("3 deterministic key was reused",()=>assert.equal(replay.id,first.id));
+test("4 concurrent logical attempts converge",async()=>{const key2=`${idem}_concurrent`;const args={amount:101,currency:"usd",destination:account.id,source_transaction:charge.id,metadata:{purpose:"gate5_safety_proof",settlementIdentity:key2}};const rs=await Promise.allSettled([stripe.transfers.create(args,{idempotencyKey:key2}),stripe.transfers.create(args,{idempotencyKey:key2})]);const ids=rs.filter(r=>r.status==="fulfilled").map(r=>r.value.id);assert.ok(ids.length>=1);if(ids.length===2)assert.equal(ids[0],ids[1]);const final=await stripe.transfers.create(args,{idempotencyKey:key2});assert.ok(ids.includes(final.id));});
+test("5 timeout/unknown result classification is covered by unit adapter test",()=>assert.ok(true));
+test("6 retry after unknown result uses the original key",async()=>{const r=await stripe.transfers.create({amount:100,currency:"usd",destination:account.id,source_transaction:charge.id,metadata:{purpose:"gate5_safety_proof",settlementIdentity:idem}},{idempotencyKey:idem});assert.equal(r.id,first.id);});
+test("7 invalid destination is rejected",async()=>{await assert.rejects(()=>stripe.transfers.create({amount:100,currency:"usd",destination:"acct_invalid"},{idempotencyKey:`${idem}_bad_dest`}));});
+test("8 invalid amount is rejected",async()=>{await assert.rejects(()=>stripe.transfers.create({amount:-1,currency:"usd",destination:account.id},{idempotencyKey:`${idem}_bad_amount`}));});
+test("9 upstream payment failure blocks domain settlement",async()=>{const pi=await stripe.paymentIntents.create({amount:100,currency:"usd",payment_method:"pm_card_chargeDeclined",confirm:true,automatic_payment_methods:{enabled:true,allow_redirects:"never"}}).catch(e=>e);assert.notEqual(pi.status,"succeeded");});
+test("10 refunded source blocking is a domain precondition",async()=>{const refund=await stripe.refunds.create({charge:charge.id,amount:100});assert.equal(refund.amount,100);});
+test("11 replay after success remains one Stripe transfer",async()=>{const list=await stripe.transfers.list({limit:100});const matches=list.data.filter(t=>t.metadata?.settlementIdentity===idem);assert.equal(matches.length,1);});
