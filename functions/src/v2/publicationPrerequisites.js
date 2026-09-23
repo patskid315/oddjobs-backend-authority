@@ -50,12 +50,15 @@ function classifyPolicyDisposition(value) {
   return Object.values(POLICY_DISPOSITIONS).includes(value) ? value : "UNKNOWN_POLICY";
 }
 
-// This is a consumer of protected backend facts, not an authoring path. The
-// eventual command must load both records itself under backend-only access.
+// This gate consumes facts produced by standingSafetyAuthority. The historical
+// v2Standing test collection is not a source: account standing is read fresh
+// from Firebase Admin Auth, while safety comes from an audited protected record.
 function publicationStandingGate({ actorRef, standing, safety }) {
   if (typeof actorRef !== "string" || !actorRef) return { allowed: false, reason: "UNKNOWN_ACTOR" };
   if (!standing || !safety || standing.subject_ref !== actorRef || safety.subject_ref !== actorRef ||
       standing.authority !== "BACKEND_DOMAIN" || safety.authority !== "BACKEND_DOMAIN" ||
+      standing.source !== "FIREBASE_ADMIN_AUTH" || safety.source !== "V2_SAFETY_DECISION" ||
+      !Number.isSafeInteger(safety.decision_version) || safety.decision_version < 1 ||
       typeof standing.policy_version !== "string" || !standing.policy_version ||
       typeof safety.policy_version !== "string" || !safety.policy_version) {
     return { allowed: false, reason: "AUTHORITY_UNAVAILABLE" };
@@ -66,15 +69,9 @@ function publicationStandingGate({ actorRef, standing, safety }) {
   return { allowed: true, reason: "CLEAR" };
 }
 
-async function readPublicationStanding(tx, db, actorRef) {
-  if (typeof actorRef !== "string" || !actorRef) return { allowed: false, reason: "UNKNOWN_ACTOR" };
-  const standingSnapshot = await tx.get(db.collection("v2Standing").doc(actorRef));
-  const safetySnapshot = await tx.get(db.collection("v2Safety").doc(actorRef));
-  return publicationStandingGate({
-    actorRef,
-    standing: standingSnapshot.exists ? standingSnapshot.data() : null,
-    safety: safetySnapshot.exists ? safetySnapshot.data() : null
-  });
+async function readPublicationStanding(tx, db, actorRef, { auth, now } = {}) {
+  const { readCurrentPublicationStanding } = require("./standingSafetyAuthority");
+  return readCurrentPublicationStanding({ tx, db, actorRef, auth, now });
 }
 
 const GEOGRAPHY_REGISTRY_VERSION = "v2-planning-1";

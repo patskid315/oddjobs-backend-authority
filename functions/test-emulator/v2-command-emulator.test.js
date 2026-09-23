@@ -8,6 +8,7 @@ const { initializeTestEnvironment, assertFails } = require("@firebase/rules-unit
 const { FirestoreV2CommandRepository } = require("../src/v2/firestoreCommandRepository");
 const { COMMAND_KINDS } = require("../src/v2/foundation");
 const { readPublicationStanding, readEligibilityGeography } = require("../src/v2/publicationPrerequisites");
+const { recordSafetyDecision } = require("../src/v2/standingSafetyAuthority");
 
 const projectId = "oddjobs-v2-command-test";
 let env, app, db, repository;
@@ -121,22 +122,42 @@ test("clients cannot read or author backend receipts", async () => {
   await assertFails(client.collection("v2CommandReceipts").doc("forged").get());
 });
 
-test("standing and safety are read from protected backend records, not client claims", async () => {
+test("live Auth and audited safety decision, not seeded markers or client claims, govern posting", async () => {
   const actorRef = "poster-1";
-  const check = () => db.runTransaction((tx) => readPublicationStanding(tx, db, actorRef));
+  let disabled = false;
+  const auth = { getUser: async (uid) => ({ uid, disabled }) };
+  const now = new Date("2026-09-23T12:00:00Z");
+  const check = () => db.runTransaction((tx) => readPublicationStanding(tx, db, actorRef, { auth, now }));
   assert.equal((await check()).allowed, false);
   await db.collection("v2Standing").doc(actorRef).set({
     authority: "BACKEND_DOMAIN", subject_ref: actorRef, policy_version: "v1", publication_allowed: true
   });
-  await db.collection("v2Safety").doc(actorRef).set({
-    authority: "BACKEND_DOMAIN", subject_ref: actorRef, policy_version: "v1", publication_clear: true
-  });
+  assert.equal((await check()).allowed, false);
+  await recordSafetyDecision({ db, operatorRef: "safety-op-1", subjectRef: actorRef,
+    state: "CLEAR", reasonCode: "REVIEW_CLEAR", expectedVersion: 0,
+    validUntil: new Date("2026-09-24T12:00:00Z"), now,
+    authorizeSafetyOperator: async (uid) => uid === "safety-op-1" });
   assert.equal((await check()).allowed, true);
+  assert.equal((await db.collection("v2SafetyAudit").get()).size, 1);
   const client = env.authenticatedContext(actorRef).firestore();
   await assertFails(client.collection("v2Standing").doc(actorRef).set({ publication_allowed: true }));
   await assertFails(client.collection("v2Safety").doc(actorRef).set({ publication_clear: true }));
-  await db.collection("v2Safety").doc(actorRef).update({ publication_clear: false });
+  await assertFails(client.collection("v2Safety").doc(actorRef).get());
+  await assertFails(client.collection("v2SafetyAudit").doc(`${actorRef}_1`).get());
+  await assertFails(client.collection("v2SafetyAudit").doc(`${actorRef}_2`).set({ state: "CLEAR" }));
+  disabled = true;
   assert.equal((await check()).allowed, false);
+  disabled = false;
+  await recordSafetyDecision({ db, operatorRef: "safety-op-1", subjectRef: actorRef,
+    state: "REVOKED", reasonCode: "REVIEW_REVOKED", expectedVersion: 1,
+    validUntil: new Date("2026-09-24T12:00:00Z"), now,
+    authorizeSafetyOperator: async () => true });
+  assert.equal((await check()).allowed, false);
+  await assert.rejects(recordSafetyDecision({ db, operatorRef: "safety-op-1", subjectRef: actorRef,
+    state: "CLEAR", reasonCode: "REVIEW_CLEAR", expectedVersion: 1,
+    validUntil: new Date("2026-09-24T12:00:00Z"), now,
+    authorizeSafetyOperator: async () => true }), /VERSION_CONFLICT/);
+  assert.equal((await db.collection("v2SafetyAudit").get()).size, 2);
 });
 
 test("protected location read yields only borough projection and rejects client writes", async () => {

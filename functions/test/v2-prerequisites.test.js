@@ -31,8 +31,8 @@ test("policy dispositions remain explicit and never inferred from task identity"
 });
 
 test("standing and safety require matching protected backend evidence", () => {
-  const standing = { subject_ref: "poster-1", authority: "BACKEND_DOMAIN", policy_version: "v1", publication_allowed: true };
-  const safety = { subject_ref: "poster-1", authority: "BACKEND_DOMAIN", policy_version: "v1", publication_clear: true };
+  const standing = { subject_ref: "poster-1", authority: "BACKEND_DOMAIN", source: "FIREBASE_ADMIN_AUTH", policy_version: "v1", publication_allowed: true };
+  const safety = { subject_ref: "poster-1", authority: "BACKEND_DOMAIN", source: "V2_SAFETY_DECISION", decision_version: 1, policy_version: "v1", publication_clear: true };
   assert.equal(publicationStandingGate({ actorRef: "poster-1", standing, safety }).allowed, true);
   assert.equal(publicationStandingGate({ actorRef: "poster-1", standing: null, safety }).allowed, false);
   assert.equal(publicationStandingGate({ actorRef: "poster-1", standing: { accountStatus: "active" }, safety }).allowed, false);
