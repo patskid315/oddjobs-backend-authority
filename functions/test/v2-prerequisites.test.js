@@ -11,6 +11,8 @@ test("approved taxonomy identity is bounded and separate from eligibility", () =
   assert.equal(Object.keys(TASKS_BY_CATEGORY).length, 17);
   assert.equal(Object.values(TASKS_BY_CATEGORY).flat().length, 22);
   assert.equal(new Set(Object.values(TASKS_BY_CATEGORY).flat()).size, 22);
+  assert.throws(() => TASKS_BY_CATEGORY.cleaning_home_help.push("unapproved_task"));
+  assert.equal(resolveCanonicalTask({ taskTypeId: "unapproved_task", taxonomyVersion: 2 }).kind, "UNKNOWN_TASK");
   assert.deepEqual(resolveCanonicalTask({ taskTypeId: "mount_tv", taxonomyVersion: 2 }), {
     kind: "CANONICAL_TASK", taskTypeId: "mount_tv", categoryId: "mounting_installation",
     taxonomyVersion: 2, separateResearchLifecycle: false
@@ -42,7 +44,8 @@ test("standing and safety require matching protected backend evidence", () => {
 });
 
 test("borough-only public projection cannot leak protected fulfillment location", () => {
-  assert.equal(BOROUGH_IDS.size, 5);
+  assert.equal(BOROUGH_IDS.length, 5);
+  assert.throws(() => BOROUGH_IDS.push("nyc:borough:unapproved"));
   const protectedLocation = {
     authority: "BACKEND_VALIDATED_LOCATION", registry_version: "v2-planning-1",
     derivation_state: "VALIDATED",

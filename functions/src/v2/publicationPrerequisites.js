@@ -24,6 +24,7 @@ const TASKS_BY_CATEGORY = Object.freeze({
   laundry: ["laundry_help"],
   minor_handyman: ["minor_home_task"]
 });
+for (const taskIds of Object.values(TASKS_BY_CATEGORY)) Object.freeze(taskIds);
 const taskToCategory = new Map(Object.entries(TASKS_BY_CATEGORY)
   .flatMap(([categoryId, tasks]) => tasks.map((taskTypeId) => [taskTypeId, categoryId])));
 
@@ -75,10 +76,11 @@ async function readPublicationStanding(tx, db, actorRef, { auth, now } = {}) {
 }
 
 const GEOGRAPHY_REGISTRY_VERSION = "v2-planning-1";
-const BOROUGH_IDS = new Set([
+const BOROUGH_IDS = Object.freeze([
   "nyc:borough:manhattan", "nyc:borough:bronx", "nyc:borough:brooklyn",
   "nyc:borough:queens", "nyc:borough:staten_island"
 ]);
+const boroughIdSet = new Set(BOROUGH_IDS);
 
 // Only a backend-validated protected location may be projected. This does not
 // geocode or accept a client-supplied borough as derivation evidence.
@@ -96,7 +98,7 @@ function projectEligibilityGeography(protectedLocation) {
   }
   if (protectedLocation.applicability !== "IN_PERSON" ||
       protectedLocation.derivation_state !== "VALIDATED" ||
-      !BOROUGH_IDS.has(protectedLocation.borough_id) ||
+      !boroughIdSet.has(protectedLocation.borough_id) ||
       typeof protectedLocation.protected_ref !== "string" || !protectedLocation.protected_ref ||
       protectedLocation.neighborhood_id != null ||
       protectedLocation.source !== "NYC_GEOCLIENT_V2" ||
