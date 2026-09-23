@@ -9,6 +9,7 @@ const { FirestoreV2CommandRepository } = require("../src/v2/firestoreCommandRepo
 const { COMMAND_KINDS } = require("../src/v2/foundation");
 const { readPublicationStanding, readEligibilityGeography } = require("../src/v2/publicationPrerequisites");
 const { recordSafetyDecision } = require("../src/v2/standingSafetyAuthority");
+const { recordProtectedNYCAddress } = require("../src/v2/protectedLocationAuthority");
 
 const projectId = "oddjobs-v2-command-test";
 let env, app, db, repository;
@@ -160,17 +161,89 @@ test("live Auth and audited safety decision, not seeded markers or client claims
   assert.equal((await db.collection("v2SafetyAudit").get()).size, 2);
 });
 
-test("protected location read yields only borough projection and rejects client writes", async () => {
-  await db.collection("v2ProtectedLocations").doc("location-1").set({
-    authority: "BACKEND_VALIDATED_LOCATION", registry_version: "v2-planning-1",
-    applicability: "IN_PERSON", borough_id: "nyc:borough:bronx", neighborhood_id: null,
-    protected_ref: "location-1", owner_ref: "poster-1", street_address: "private", unit: "private"
-  });
-  const geography = await db.runTransaction((tx) => readEligibilityGeography(tx, db, "location-1", "poster-1"));
+test("protected location producer derives borough, isolates exact address, and rejects client writes", async () => {
+  const address = { house_number: "123", street: "Example Street", zip_code: "10451", unit: "Apt 2" };
+  let calls = 0;
+  const validator = { providerId: "NYC_GEOCLIENT_V2", validateExactAddress: async (providerAddress, digest) => {
+    calls++;
+    assert.equal(Object.hasOwn(providerAddress, "unit"), false);
+    return { provider_id: "NYC_GEOCLIENT_V2", input_digest: digest, status: "EXACT_ADDRESS",
+      dataset_version: "test-dataset", provider_reference: "provider-record-1",
+      matches: [{ geosupport_return_code: "00", input_match_confirmed: true, borough_code: "2" }] };
+  } };
+  const args = { db, authenticatedOwnerRef: "poster-1", intentKey: "location-intent-123", address,
+    validator, now: new Date("2026-09-23T10:00:00Z") };
+  const first = await recordProtectedNYCAddress(args);
+  assert.equal(first.eligibility_geography.borough_id, "nyc:borough:bronx");
+  assert.equal(JSON.stringify(first).includes("Example Street"), false);
+  const stored = (await db.collection("v2ProtectedLocations").doc(first.protected_ref).get()).data();
+  assert.equal(stored.exact_address.street, "Example Street");
+  assert.equal(stored.owner_ref, "poster-1");
+  assert.equal(stored.source, "NYC_GEOCLIENT_V2");
+  const repeat = await recordProtectedNYCAddress(args);
+  assert.deepEqual(repeat, first);
+  assert.equal(calls, 1);
+  await assert.rejects(recordProtectedNYCAddress({ ...args, address: { ...address, street: "Different Street" } }), /LOCATION_INTENT_CONFLICT/);
+  const geography = await db.runTransaction((tx) => readEligibilityGeography(tx, db, first.protected_ref, "poster-1"));
   assert.equal(geography.borough_id, "nyc:borough:bronx");
-  assert.equal(JSON.stringify(geography).includes("private"), false);
-  await assert.rejects(db.runTransaction((tx) => readEligibilityGeography(tx, db, "location-1", "poster-2")), /ownership/);
+  assert.equal(JSON.stringify(geography).includes("Example Street"), false);
+  await assert.rejects(db.runTransaction((tx) => readEligibilityGeography(tx, db, first.protected_ref, "poster-2")), /ownership/);
   const client = env.authenticatedContext("poster-1").firestore();
-  await assertFails(client.collection("v2ProtectedLocations").doc("location-1").get());
+  await assertFails(client.collection("v2ProtectedLocations").doc(first.protected_ref).get());
   await assertFails(client.collection("v2ProtectedLocations").doc("location-2").set({ street_address: "forged" }));
+});
+
+test("ambiguous, mismatched, unavailable and non-NYC validation cannot create protected authority", async () => {
+  const address = { house_number: "123", street: "Example Street", zip_code: "10451" };
+  const base = { db, authenticatedOwnerRef: "poster-1", intentKey: "location-intent-456", address };
+  const result = (digest) => ({ provider_id: "NYC_GEOCLIENT_V2", input_digest: digest,
+    status: "EXACT_ADDRESS", dataset_version: "test-dataset", provider_reference: "record",
+    matches: [{ geosupport_return_code: "00", input_match_confirmed: true, borough_code: "2" }] });
+  const provider = (change) => ({ providerId: "NYC_GEOCLIENT_V2",
+    validateExactAddress: async (_, digest) => change(result(digest)) });
+  const invalid = [
+    provider((r) => ({ ...r, matches: [r.matches[0], r.matches[0]] })),
+    provider((r) => ({ ...r, input_digest: "wrong" })),
+    provider((r) => ({ ...r, matches: [{ ...r.matches[0], borough_code: "9" }] })),
+    provider((r) => ({ ...r, matches: [{ ...r.matches[0], input_match_confirmed: false }] })),
+    provider((r) => ({ ...r, status: "AMBIGUOUS" }))
+  ];
+  for (const validator of invalid) {
+    await assert.rejects(recordProtectedNYCAddress({ ...base, validator }), /LOCATION_VALIDATION_UNRESOLVED/);
+  }
+  await assert.rejects(recordProtectedNYCAddress({ ...base, validator: null }), /LOCATION_AUTHORITY_UNAVAILABLE/);
+  await assert.rejects(recordProtectedNYCAddress({ ...base, validator: { providerId: "CLIENT", validateExactAddress: async () => result("x") } }), /LOCATION_AUTHORITY_UNAVAILABLE/);
+  await assert.rejects(recordProtectedNYCAddress({ ...base, validator: { providerId: "NYC_GEOCLIENT_V2", validateExactAddress: async () => { throw new Error("sensitive provider detail"); } } }), /LOCATION_VALIDATION_UNAVAILABLE/);
+  assert.equal((await db.collection("v2ProtectedLocations").get()).size, 0);
+});
+
+test("conflicting concurrent borough validation invalidates protected geography", async () => {
+  const address = { house_number: "123", street: "Example Street", zip_code: "10451" };
+  const input = { db, authenticatedOwnerRef: "poster-1", intentKey: "location-intent-race", address };
+  let arrivals = 0;
+  let release;
+  const bothValidating = new Promise((resolve) => { release = resolve; });
+  const validator = (boroughCode) => ({ providerId: "NYC_GEOCLIENT_V2",
+    validateExactAddress: async (_, digest) => {
+      arrivals++;
+      if (arrivals === 2) release();
+      await bothValidating;
+      return { provider_id: "NYC_GEOCLIENT_V2",
+      input_digest: digest, status: "EXACT_ADDRESS", dataset_version: "test-dataset",
+      provider_reference: `record-${boroughCode}`,
+      matches: [{ geosupport_return_code: "00", input_match_confirmed: true, borough_code: boroughCode }] };
+    } });
+  const results = await Promise.allSettled([
+    recordProtectedNYCAddress({ ...input, validator: validator("2") }),
+    recordProtectedNYCAddress({ ...input, validator: validator("3") })
+  ]);
+  assert.equal(arrivals, 2);
+  assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(results.filter((result) => result.status === "rejected" && result.reason.message === "LOCATION_VALIDATION_UNRESOLVED").length, 1);
+  const protectedRef = results.find((result) => result.status === "fulfilled").value.protected_ref;
+  const stored = (await db.collection("v2ProtectedLocations").doc(protectedRef).get()).data();
+  assert.equal((await db.collection("v2ProtectedLocations").get()).size, 1);
+  assert.equal(stored.derivation_state, "UNRESOLVED");
+  assert.equal(stored.conflict_reason_code, "PROVIDER_BOROUGH_CONFLICT");
+  await assert.rejects(db.runTransaction((tx) => readEligibilityGeography(tx, db, protectedRef, "poster-1")), /Validated borough/);
 });

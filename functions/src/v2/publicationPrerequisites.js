@@ -95,9 +95,18 @@ function projectEligibilityGeography(protectedLocation) {
       geography_registry_version: GEOGRAPHY_REGISTRY_VERSION, contains_exact_address_or_coordinates: false });
   }
   if (protectedLocation.applicability !== "IN_PERSON" ||
+      protectedLocation.derivation_state !== "VALIDATED" ||
       !BOROUGH_IDS.has(protectedLocation.borough_id) ||
       typeof protectedLocation.protected_ref !== "string" || !protectedLocation.protected_ref ||
-      protectedLocation.neighborhood_id != null) {
+      protectedLocation.neighborhood_id != null ||
+      protectedLocation.source !== "NYC_GEOCLIENT_V2" ||
+      protectedLocation.derivation_version !== "v2-nyc-address-1" ||
+      typeof protectedLocation.dataset_version !== "string" || !protectedLocation.dataset_version ||
+      typeof protectedLocation.provider_reference !== "string" || !protectedLocation.provider_reference ||
+      typeof protectedLocation.address_digest !== "string" || !/^[0-9a-f]{64}$/.test(protectedLocation.address_digest) ||
+      !((protectedLocation.validated_at instanceof Date && Number.isFinite(protectedLocation.validated_at.getTime())) ||
+        (protectedLocation.validated_at && typeof protectedLocation.validated_at.toMillis === "function" &&
+         Number.isFinite(protectedLocation.validated_at.toMillis())))) {
     throw new TypeError("Validated borough-level in-person location required");
   }
   return Object.freeze({ applicability: "IN_PERSON", borough_id: protectedLocation.borough_id,

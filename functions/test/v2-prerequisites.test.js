@@ -45,6 +45,10 @@ test("borough-only public projection cannot leak protected fulfillment location"
   assert.equal(BOROUGH_IDS.size, 5);
   const protectedLocation = {
     authority: "BACKEND_VALIDATED_LOCATION", registry_version: "v2-planning-1",
+    derivation_state: "VALIDATED",
+    source: "NYC_GEOCLIENT_V2", derivation_version: "v2-nyc-address-1",
+    dataset_version: "test-dataset", provider_reference: "test-record",
+    address_digest: "a".repeat(64), validated_at: new Date("2026-09-23T10:00:00Z"),
     applicability: "IN_PERSON", borough_id: "nyc:borough:queens", neighborhood_id: null,
     protected_ref: "private-location-1", street_address: "private street", unit: "private unit",
     latitude: 40.0, longitude: -73.0
