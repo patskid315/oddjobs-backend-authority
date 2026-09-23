@@ -9,7 +9,7 @@ const { POLICY_VERSION, OUTCOME, evaluateTaskScopePolicy } = require("./taskScop
 // not publish, verify the truth of poster statements, or clear unstructured
 // text. A future authenticated command handler must supply actorRef from its
 // verified server context, never from a request body's owner field.
-const DRAFT_SCHEMA_VERSION = 1;
+const DRAFT_SCHEMA_VERSION = 2;
 const COLLECTION = "v2PostingDrafts";
 const CLEANING_SCOPE_KEYS = ["areas_items", "cleaning_level", "approximate_scale",
   "room_count", "supplies_responsibility", "condition_hazards"];
@@ -37,20 +37,52 @@ function validText(value, max, allowEmpty = false) {
     (allowEmpty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
 }
 
+function validSchedule(window, duration) {
+  return exactKeys(window, ["start_at", "end_at", "time_zone"]) &&
+    validText(window.start_at, 40) && validText(window.end_at, 40) &&
+    window.time_zone === "America/New_York" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(window.start_at) &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z$/.test(window.end_at) &&
+    Number.isFinite(Date.parse(window.start_at)) &&
+    Date.parse(window.end_at) - Date.parse(window.start_at) === duration * 60_000;
+}
+
 function draftRefFor(actorRef, intentKey) {
   const joined = ["v2-posting-draft-1", actorRef, intentKey]
     .map((value) => `${Buffer.byteLength(value, "utf8")}:${value}`).join("");
   return crypto.createHash("sha256").update(joined).digest("hex");
 }
 
+// The first publishable local scope contains no interpolated poster text.
+// All other cleaning drafts retain their text for manual clarification.
+function reconciledText(content) {
+  const scope = content.scope;
+  return scope.areas_items.length === 2 &&
+    scope.areas_items[0] === "kitchen" && scope.areas_items[1] === "bathroom" &&
+    scope.cleaning_level === "STANDARD" &&
+    scope.approximate_scale === "two rooms" && scope.room_count === 2 &&
+    scope.supplies_responsibility === "POSTER_PROVIDES" &&
+    scope.condition_hazards === "NONE_CONFIRMED" &&
+    content.title === "Clean kitchen and bathroom" &&
+    content.description === "Standard cleaning of kitchen and bathroom. Poster provides supplies." &&
+    content.additional_info === "" &&
+    content.conflicting_facts.length === 0 &&
+    content.additional_task_type_ids.length === 0 &&
+    content.prohibited_scope_codes.length === 0 &&
+    CLEANING_RISK_KEYS.every((key) => content.risk_facts[key] === "ABSENT_CONFIRMED");
+}
+
 function normalizedSubmission(submission) {
   if (!exactKeys(submission, ["task_type_id", "taxonomy_version", "title", "description",
-    "additional_info", "scope", "risk_facts", "conflicting_facts",
+    "additional_info", "duration_minutes", "schedule_window", "scope", "risk_facts", "conflicting_facts",
     "additional_task_type_ids", "prohibited_scope_codes"]) ||
       submission.task_type_id !== "general_cleaning" ||
       submission.taxonomy_version !== TAXONOMY_VERSION ||
       !validText(submission.title, 160) || !validText(submission.description, 5000) ||
       !validText(submission.additional_info, 5000, true) ||
+      !Number.isSafeInteger(submission.duration_minutes) ||
+      submission.duration_minutes < 30 || submission.duration_minutes > 720 ||
+      !validSchedule(submission.schedule_window, submission.duration_minutes) ||
       !exactKeys(submission.scope, CLEANING_SCOPE_KEYS) ||
       !exactKeys(submission.risk_facts, CLEANING_RISK_KEYS) ||
       !Array.isArray(submission.scope.areas_items) ||
@@ -81,7 +113,7 @@ function normalizedSubmission(submission) {
 
 function factsForPolicy(submission, confirmedAt) {
   return { confirmation: { source: "POSTER_CONFIRMED", confirmed_at: confirmedAt,
-    fact_schema_version: DRAFT_SCHEMA_VERSION }, scope: submission.scope,
+    fact_schema_version: 1 }, scope: submission.scope,
   risk_facts: submission.risk_facts, conflicting_facts: submission.conflicting_facts,
   additional_task_type_ids: submission.additional_task_type_ids,
   prohibited_scope_codes: submission.prohibited_scope_codes };
@@ -124,6 +156,9 @@ async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVe
     if ((prior ? prior.draft_version : 0) !== expectedVersion) {
       throw new Error("DRAFT_VERSION_CONFLICT");
     }
+    if (Date.parse(content.schedule_window.end_at) <= now.getTime()) {
+      throw new Error("DRAFT_SCHEDULE_EXPIRED");
+    }
     const confirmedAt = now.toISOString();
     const policy = evaluateTaskScopePolicy({ policyVersion: POLICY_VERSION,
       taskTypeId: content.task_type_id, taxonomyVersion: content.taxonomy_version,
@@ -137,9 +172,12 @@ async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVe
         description: content.description, additional_info: content.additional_info }),
       title: content.title, description: content.description,
       additional_info: content.additional_info,
+      duration_minutes: content.duration_minutes,
+      schedule_window: content.schedule_window,
       confirmed_facts: factsForPolicy(content, confirmedAt),
       policy_outcome: policy.outcome, policy_reason_codes: [...policy.reason_codes],
-      text_reconciliation_state: "UNRESOLVED",
+      text_reconciliation_state: policy.outcome === OUTCOME.SUPPORTED &&
+        reconciledText(content) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
       confirmed_at: confirmedAt, updated_at: now,
       created_at: prior ? prior.created_at : now };
     tx.set(ref, record);
@@ -161,9 +199,12 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
       record.policy_version !== POLICY_VERSION ||
       record.task_type_id !== "general_cleaning" ||
       record.taxonomy_version !== TAXONOMY_VERSION ||
-      record.text_reconciliation_state !== "UNRESOLVED" ||
+      !["UNRESOLVED", "CLEARED_EXACT_TEMPLATE_V1"].includes(record.text_reconciliation_state) ||
       !validText(record.title, 160) || !validText(record.description, 5000) ||
       !validText(record.additional_info, 5000, true) ||
+      !Number.isSafeInteger(record.duration_minutes) ||
+      record.duration_minutes < 30 || record.duration_minutes > 720 ||
+      !validSchedule(record.schedule_window, record.duration_minutes) ||
       record.text_digest !== commandPayloadDigest({ title: record.title,
         description: record.description, additional_info: record.additional_info }) ||
       !exactKeys(record.confirmed_facts, ["confirmation", "scope", "risk_facts",
@@ -176,6 +217,7 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
   const submission = { task_type_id: record.task_type_id,
     taxonomy_version: record.taxonomy_version, title: record.title,
     description: record.description, additional_info: record.additional_info,
+    duration_minutes: record.duration_minutes, schedule_window: record.schedule_window,
     scope: record.confirmed_facts.scope, risk_facts: record.confirmed_facts.risk_facts,
     conflicting_facts: record.confirmed_facts.conflicting_facts,
     additional_task_type_ids: record.confirmed_facts.additional_task_type_ids,
@@ -187,14 +229,19 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
     taskTypeId: record.task_type_id, taxonomyVersion: record.taxonomy_version,
     confirmedFacts: record.confirmed_facts });
   if (policy.outcome !== record.policy_outcome ||
-      JSON.stringify(policy.reason_codes) !== JSON.stringify(record.policy_reason_codes)) {
+      JSON.stringify(policy.reason_codes) !== JSON.stringify(record.policy_reason_codes) ||
+      record.text_reconciliation_state !== (policy.outcome === OUTCOME.SUPPORTED &&
+        reconciledText(submission) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED")) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   return { draft_ref: draftRef, draft_version: expectedVersion,
     owner_ref: actorRef, title: record.title, description: record.description,
-    additional_info: record.additional_info, confirmed_facts: record.confirmed_facts,
+    additional_info: record.additional_info,
+    duration_minutes: record.duration_minutes, schedule_window: record.schedule_window,
+    confirmed_facts: record.confirmed_facts,
     content_digest: record.content_digest, policy_outcome: policy.outcome,
-    policy_version: POLICY_VERSION, text_reconciliation_state: "UNRESOLVED" };
+    policy_version: POLICY_VERSION,
+    text_reconciliation_state: record.text_reconciliation_state };
 }
 
 module.exports = { DRAFT_SCHEMA_VERSION, confirmGeneralCleaningDraft,

@@ -252,6 +252,8 @@ test("conflicting concurrent borough validation invalidates protected geography"
 function cleaningSubmission() {
   return { task_type_id: "general_cleaning", taxonomy_version: 2,
     title: "Clean two rooms", description: "Clean the kitchen and bathroom.", additional_info: "",
+    duration_minutes: 120, schedule_window: { start_at: "2026-09-24T13:00:00Z",
+      end_at: "2026-09-24T15:00:00Z", time_zone: "America/New_York" },
     scope: { areas_items: ["kitchen", "bathroom"], cleaning_level: "STANDARD",
       approximate_scale: "two rooms", room_count: 2, supplies_responsibility: "POSTER_PROVIDES",
       condition_hazards: "NONE_CONFIRMED" },
