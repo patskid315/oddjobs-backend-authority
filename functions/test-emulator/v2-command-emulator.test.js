@@ -10,6 +10,7 @@ const { COMMAND_KINDS } = require("../src/v2/foundation");
 const { readPublicationStanding, readEligibilityGeography } = require("../src/v2/publicationPrerequisites");
 const { recordSafetyDecision } = require("../src/v2/standingSafetyAuthority");
 const { recordProtectedNYCAddress } = require("../src/v2/protectedLocationAuthority");
+const { confirmGeneralCleaningDraft, readCurrentConfirmedCleaningDraft } = require("../src/v2/confirmedPostingDraft");
 
 const projectId = "oddjobs-v2-command-test";
 let env, app, db, repository;
@@ -246,4 +247,92 @@ test("conflicting concurrent borough validation invalidates protected geography"
   assert.equal(stored.derivation_state, "UNRESOLVED");
   assert.equal(stored.conflict_reason_code, "PROVIDER_BOROUGH_CONFLICT");
   await assert.rejects(db.runTransaction((tx) => readEligibilityGeography(tx, db, protectedRef, "poster-1")), /Validated borough/);
+});
+
+function cleaningSubmission() {
+  return { task_type_id: "general_cleaning", taxonomy_version: 2,
+    title: "Clean two rooms", description: "Clean the kitchen and bathroom.", additional_info: "",
+    scope: { areas_items: ["kitchen", "bathroom"], cleaning_level: "STANDARD",
+      approximate_scale: "two rooms", room_count: 2, supplies_responsibility: "POSTER_PROVIDES",
+      condition_hazards: "NONE_CONFIRMED" },
+    risk_facts: { medical_or_intimate_care: "ABSENT_CONFIRMED",
+      hazardous_materials: "ABSENT_CONFIRMED", pest_control: "ABSENT_CONFIRMED",
+      chemical_risk: "ABSENT_CONFIRMED", unknown_conditions: "ABSENT_CONFIRMED" },
+    conflicting_facts: [], additional_task_type_ids: [], prohibited_scope_codes: [] };
+}
+
+test("owner-bound confirmed cleaning draft is versioned, replay-safe and client-protected", async () => {
+  const base = { db, actorRef: "poster-1", intentKey: "cleaning-draft-intent-1",
+    expectedVersion: 0, submission: cleaningSubmission(), now: new Date("2026-09-23T10:00:00Z") };
+  const first = await confirmGeneralCleaningDraft(base);
+  assert.equal(first.draft_version, 1);
+  assert.equal(first.policy_outcome, "SUPPORTED_ADVISORY");
+  assert.equal(first.text_reconciliation_state, "UNRESOLVED");
+  assert.deepEqual(await confirmGeneralCleaningDraft(base), first);
+  const current = await db.runTransaction((tx) => readCurrentConfirmedCleaningDraft(tx, db,
+    first.draft_ref, "poster-1", 1));
+  assert.equal(current.confirmed_facts.confirmation.source, "POSTER_CONFIRMED");
+  assert.equal(current.policy_outcome, "SUPPORTED_ADVISORY");
+  assert.equal(current.text_reconciliation_state, "UNRESOLVED");
+  await assert.rejects(db.runTransaction((tx) => readCurrentConfirmedCleaningDraft(tx, db,
+    first.draft_ref, "poster-2", 1)), /CONFIRMED_DRAFT_UNAVAILABLE/);
+  const revised = await confirmGeneralCleaningDraft({ ...base, expectedVersion: 1,
+    submission: { ...cleaningSubmission(), title: "Revised cleaning scope" } });
+  assert.equal(revised.draft_version, 2);
+  await assert.rejects(db.runTransaction((tx) => readCurrentConfirmedCleaningDraft(tx, db,
+    first.draft_ref, "poster-1", 1)), /CONFIRMED_DRAFT_UNAVAILABLE/);
+  await assert.rejects(confirmGeneralCleaningDraft({ ...base, submission: {
+    ...cleaningSubmission(), title: "Conflicting retry" } }), /DRAFT_VERSION_CONFLICT/);
+  const client = env.authenticatedContext("poster-1").firestore();
+  await assertFails(client.collection("v2PostingDrafts").doc(first.draft_ref).get());
+  await assertFails(client.collection("v2PostingDrafts").doc(first.draft_ref).set({ owner_ref: "poster-1", policy_outcome: "SUPPORTED_ADVISORY" }));
+  assert.equal((await db.collection("v2PostingDrafts").get()).size, 1);
+  assert.equal((await db.collection("v2TestJobs").get()).size, 0);
+  assert.equal((await db.collection("payments").get()).size, 0);
+});
+
+test("draft preserves uncertain scope but never promotes it into a safe posting fact", async () => {
+  const base = { db, actorRef: "poster-1", intentKey: "cleaning-draft-intent-2",
+    expectedVersion: 0, now: new Date("2026-09-23T10:00:00Z") };
+  const conflicted = cleaningSubmission();
+  conflicted.conflicting_facts = ["description may include another task"];
+  const first = await confirmGeneralCleaningDraft({ ...base, submission: conflicted });
+  assert.equal(first.policy_outcome, "ESCALATION_REQUIRED");
+  const prohibited = cleaningSubmission();
+  prohibited.prohibited_scope_codes = ["HAZARDOUS_MATERIALS"];
+  const second = await confirmGeneralCleaningDraft({ ...base,
+    intentKey: "cleaning-draft-intent-3", submission: prohibited });
+  assert.equal(second.policy_outcome, "UNSUPPORTED_WITHHOLD");
+  await assert.rejects(confirmGeneralCleaningDraft({ ...base,
+    intentKey: "cleaning-draft-intent-4", submission: { ...cleaningSubmission(),
+      policy_outcome: "SUPPORTED_ADVISORY" } }), /DRAFT_INPUT_INVALID/);
+  assert.equal((await db.collection("v2TestJobs").get()).size, 0);
+});
+
+test("draft rejects unbounded or unknown nested inputs before persistence", async () => {
+  const base = { db, actorRef: "poster-1", intentKey: "cleaning-draft-input-bounds",
+    expectedVersion: 0, now: new Date("2026-09-23T10:00:00Z") };
+  for (const change of [
+    { scope: { ...cleaningSubmission().scope, areas_items: ["x".repeat(121)] } },
+    { scope: { ...cleaningSubmission().scope, extra: "unrelated private data" } },
+    { risk_facts: { ...cleaningSubmission().risk_facts, extra: "unrelated private data" } },
+    { conflicting_facts: Array(21).fill("conflict") },
+    { additional_task_type_ids: [{ nested: Array(1000).fill("x") }] }
+  ]) {
+    await assert.rejects(confirmGeneralCleaningDraft({ ...base,
+      submission: { ...cleaningSubmission(), ...change } }), /DRAFT_INPUT_INVALID/);
+  }
+  assert.equal((await db.collection("v2PostingDrafts").get()).size, 0);
+});
+
+test("draft replay fails closed if stored derived policy or text is tampered", async () => {
+  const base = { db, actorRef: "poster-1", intentKey: "cleaning-draft-tamper",
+    expectedVersion: 0, submission: cleaningSubmission(),
+    now: new Date("2026-09-23T10:00:00Z") };
+  const first = await confirmGeneralCleaningDraft(base);
+  const ref = db.collection("v2PostingDrafts").doc(first.draft_ref);
+  await ref.update({ policy_outcome: "UNSUPPORTED_WITHHOLD" });
+  await assert.rejects(confirmGeneralCleaningDraft(base), /CONFIRMED_DRAFT_UNAVAILABLE/);
+  await ref.update({ policy_outcome: "SUPPORTED_ADVISORY", text_digest: "tampered" });
+  await assert.rejects(confirmGeneralCleaningDraft(base), /CONFIRMED_DRAFT_UNAVAILABLE/);
 });
