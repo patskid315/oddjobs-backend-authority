@@ -3,6 +3,7 @@ const functions=require("firebase-functions/v1");const admin=require("firebase-a
 const {FirestoreSettlementRepository}=require("./src/settlement/firestoreSettlementRepository");
 const {createCompletionHandler}=require("./src/settlement/completionHandler");
 const {createPublicationCallable}=require("./src/v2/publicationCallable");
+const {createConfirmedDraftCallable}=require("./src/v2/confirmedDraftCallable");
 if(!admin.apps.length)admin.initializeApp();
 const repository=new FirestoreSettlementRepository({db:admin.firestore()});
 const completionHandler=createCompletionHandler({repository,logger:functions.logger});
@@ -16,4 +17,9 @@ exports.releasePaymentOnCompletion=functions.firestore.document("jobPost/{jobId}
 exports.publishV2GeneralCleaning=functions.https.onCall(createPublicationCallable({
   db:admin.firestore(),auth:admin.auth(),env:process.env,
   HttpsError:functions.https.HttpsError
+}));
+
+// Draft ownership comes exclusively from verified callable authentication.
+exports.confirmV2GeneralCleaningDraft=functions.https.onCall(createConfirmedDraftCallable({
+  db:admin.firestore(),HttpsError:functions.https.HttpsError
 }));
