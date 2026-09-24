@@ -11,9 +11,10 @@ const inventory=JSON.parse(fs.readFileSync(path.join(root,"production-baseline/f
 if(inventory.expectedCount!==45||inventory.functions.length!==45||new Set(inventory.functions).size!==45)errors.push("production Function inventory differs from the verified 45-function baseline");
 if(JSON.stringify(inventory.intentionalEmergencyDeployTargets)!==JSON.stringify(["releasePaymentOnCompletion"]))errors.push("emergency deploy target drift");
 if(!completion.includes("exports.releasePaymentOnCompletion"))errors.push("emergency target export missing");
-const candidateExports=[...completion.matchAll(/exports\.([A-Za-z0-9_]+)\s*=/g)].map(m=>m[1]);if(JSON.stringify(candidateExports)!==JSON.stringify(["releasePaymentOnCompletion","publishV2GeneralCleaning","confirmV2GeneralCleaningDraft"]))errors.push(`unexpected candidate exports: ${candidateExports.join(",")}`);
+const candidateExports=[...completion.matchAll(/exports\.([A-Za-z0-9_]+)\s*=/g)].map(m=>m[1]);if(JSON.stringify(candidateExports)!==JSON.stringify(["releasePaymentOnCompletion","publishV2GeneralCleaning","confirmV2GeneralCleaningDraft","recordV2ProtectedLocation"]))errors.push(`unexpected candidate exports: ${candidateExports.join(",")}`);
 if(!/exports\.publishV2GeneralCleaning\s*=\s*functions\.https\.onCall\(/.test(completion))errors.push("V2 publication must use authenticated callable transport");
 if(!/exports\.confirmV2GeneralCleaningDraft\s*=\s*functions\.https\.onCall\(/.test(completion))errors.push("V2 draft confirmation must use authenticated callable transport");
+if(!/exports\.recordV2ProtectedLocation\s*=\s*functions\.runWith\(\{\s*secrets:\["NYC_GEOCLIENT_SUBSCRIPTION_KEY"\]\s*\}\)\.https\.onCall\(createProtectedLocationCallable\(/.test(completion))errors.push("V2 protected location must use authenticated callable transport and server secret binding");
 const publicationCallable=fs.readFileSync(path.join(root,"functions/src/v2/publicationCallable.js"),"utf8");
 if(!publicationCallable.includes('env.ODDJOBS_V2_PUBLICATION_ENABLED === "true"'))errors.push("V2 publication must remain disabled without explicit server enablement");
 if(/require\(["']\.\/src\/settlement\/executor["']\)/.test(completion)||/SETTLEMENT_EXECUTOR_ENABLED/.test(completion))errors.push("guarded executor is reachable from emergency entry point");

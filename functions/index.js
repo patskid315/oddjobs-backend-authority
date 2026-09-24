@@ -4,6 +4,7 @@ const {FirestoreSettlementRepository}=require("./src/settlement/firestoreSettlem
 const {createCompletionHandler}=require("./src/settlement/completionHandler");
 const {createPublicationCallable}=require("./src/v2/publicationCallable");
 const {createConfirmedDraftCallable}=require("./src/v2/confirmedDraftCallable");
+const {createProtectedLocationCallable}=require("./src/v2/protectedLocationCallable");
 if(!admin.apps.length)admin.initializeApp();
 const repository=new FirestoreSettlementRepository({db:admin.firestore()});
 const completionHandler=createCompletionHandler({repository,logger:functions.logger});
@@ -21,5 +22,12 @@ exports.publishV2GeneralCleaning=functions.https.onCall(createPublicationCallabl
 
 // Draft ownership comes exclusively from verified callable authentication.
 exports.confirmV2GeneralCleaningDraft=functions.https.onCall(createConfirmedDraftCallable({
+  db:admin.firestore(),HttpsError:functions.https.HttpsError
+}));
+
+// Declares a runtime binding only; no secret is read at module initialization.
+exports.recordV2ProtectedLocation=functions.runWith({
+  secrets:["NYC_GEOCLIENT_SUBSCRIPTION_KEY"]
+}).https.onCall(createProtectedLocationCallable({
   db:admin.firestore(),HttpsError:functions.https.HttpsError
 }));
