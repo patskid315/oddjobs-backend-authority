@@ -18,29 +18,13 @@ const PROHIBITED = new Set([
   "BUILDING_RULE_VIOLATION", "UNAUTHORIZED_SYSTEM_ACCESS", "SAFETY_CONTROL_EVASION",
   "ILLEGAL_OR_UNSAFE_PURPOSE"
 ]);
-const CLEANING_RISKS = Object.freeze([
-  "medical_or_intimate_care", "hazardous_materials", "pest_control",
-  "chemical_risk", "unknown_conditions"
-]);
-const CLEANING_SCOPE = Object.freeze([
-  "areas_items", "cleaning_level", "approximate_scale", "room_count",
-  "supplies_responsibility", "condition_hazards"
-]);
-
 function decision(outcome, reasonCodes, taskTypeId = null) {
   return Object.freeze({ policy_version: POLICY_VERSION, outcome,
     reason_codes: Object.freeze(reasonCodes), task_type_id: taskTypeId });
 }
 
-function plain(value) {
-  return value !== null && typeof value === "object" &&
-    !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exactKeys(value, keys) {
-  return plain(value) && Object.keys(value).length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key));
-}
+const { plain, exactKeys } = require("./confirmedFactValidation");
+const { taskValidator } = require("./taskValidatorRegistry");
 
 function isoTime(value) {
   return typeof value === "string" &&
@@ -48,27 +32,12 @@ function isoTime(value) {
     Number.isFinite(Date.parse(value));
 }
 
-function confirmedCleaningFacts(facts) {
-  if (!exactKeys(facts, ["confirmation", "scope", "risk_facts", "conflicting_facts", "additional_task_type_ids", "prohibited_scope_codes"]) ||
-      !exactKeys(facts.confirmation, ["source", "confirmed_at", "fact_schema_version"]) ||
-      facts.confirmation.source !== "POSTER_CONFIRMED" ||
-      facts.confirmation.fact_schema_version !== 1 ||
-      !isoTime(facts.confirmation.confirmed_at) ||
-      !exactKeys(facts.scope, CLEANING_SCOPE) ||
-      !exactKeys(facts.risk_facts, CLEANING_RISKS) ||
-      !Array.isArray(facts.conflicting_facts) || facts.conflicting_facts.length !== 0 ||
-      !Array.isArray(facts.additional_task_type_ids) || facts.additional_task_type_ids.length !== 0 ||
-      !Array.isArray(facts.prohibited_scope_codes) || facts.prohibited_scope_codes.length !== 0) return false;
-
-  const scope = facts.scope;
-  return Array.isArray(scope.areas_items) && scope.areas_items.length > 0 &&
-    scope.areas_items.every((value) => typeof value === "string" && value.trim().length > 0) &&
-    ["STANDARD", "DEEP"].includes(scope.cleaning_level) &&
-    typeof scope.approximate_scale === "string" && scope.approximate_scale.trim().length > 0 &&
-    Number.isSafeInteger(scope.room_count) && scope.room_count > 0 &&
-    ["POSTER_PROVIDES", "WORKER_PROVIDES", "EITHER_PARTY", "SHARED"].includes(scope.supplies_responsibility) &&
-    scope.condition_hazards === "NONE_CONFIRMED" &&
-    CLEANING_RISKS.every((risk) => facts.risk_facts[risk] === "ABSENT_CONFIRMED");
+function confirmedEnvelope(facts) {
+  return exactKeys(facts, ["confirmation", "scope", "risk_facts", "conflicting_facts", "additional_task_type_ids", "prohibited_scope_codes"]) &&
+    exactKeys(facts.confirmation, ["source", "confirmed_at", "fact_schema_version"]) &&
+    facts.confirmation.source === "POSTER_CONFIRMED" && isoTime(facts.confirmation.confirmed_at) &&
+    [facts.conflicting_facts, facts.additional_task_type_ids, facts.prohibited_scope_codes]
+      .every((values) => Array.isArray(values) && values.length === 0);
 }
 
 function evaluateTaskScopePolicy(input) {
@@ -88,15 +57,13 @@ function evaluateTaskScopePolicy(input) {
       Array.isArray(facts.additional_task_type_ids) && facts.additional_task_type_ids.length) {
     return decision(OUTCOME.ESCALATE, ["CONFLICTING_OR_MULTITASK_SCOPE"], task.taskTypeId);
   }
-  // Only this fully structured family has a positive path in this increment.
-  // Other approved task identities remain unknown pending their own rules.
-  if (task.taskTypeId !== "general_cleaning") {
-    return decision(OUTCOME.ESCALATE, ["TASK_SCOPE_RULE_NOT_IMPLEMENTED"], task.taskTypeId);
-  }
-  if (!confirmedCleaningFacts(facts)) {
+  const validator = taskValidator(task.taskTypeId, input.taxonomyVersion,
+    facts.confirmation && facts.confirmation.fact_schema_version);
+  if (!validator) return decision(OUTCOME.ESCALATE, ["TASK_SCOPE_RULE_NOT_IMPLEMENTED"], task.taskTypeId);
+  if (!confirmedEnvelope(facts) || !validator.materialFactsResolved(facts.scope, facts.risk_facts)) {
     return decision(OUTCOME.ESCALATE, ["MATERIAL_SCOPE_OR_SAFETY_FACT_MISSING"], task.taskTypeId);
   }
-  return decision(OUTCOME.SUPPORTED, ["ORDINARY_CONFIRMED_CLEANING_SCOPE"], task.taskTypeId);
+  return decision(OUTCOME.SUPPORTED, [validator.supportedReason], task.taskTypeId);
 }
 
 module.exports = { POLICY_VERSION, OUTCOME, evaluateTaskScopePolicy };

@@ -10,7 +10,7 @@ const { POLICY_VERSION } = require("../src/v2/taskScopePolicy");
 const { GEOGRAPHY_REGISTRY_VERSION } = require("../src/v2/publicationPrerequisites");
 const { recordSafetyDecision } = require("../src/v2/standingSafetyAuthority");
 const { recordProtectedNYCAddress, PROVIDER_ID } = require("../src/v2/protectedLocationAuthority");
-const { confirmGeneralCleaningDraft } = require("../src/v2/confirmedPostingDraft");
+const { confirmJobDraft, confirmGeneralCleaningDraft } = require("../src/v2/confirmedPostingDraft");
 const { PUBLICATION_POLICY_VERSION, publishGeneralCleaningJob } = require("../src/v2/publishOrdinaryJob");
 const { createPublicationCallable } = require("../src/v2/publicationCallable");
 
@@ -45,13 +45,13 @@ function cleaningSubmission() {
     conflicting_facts: [], additional_task_type_ids: [], prohibited_scope_codes: [] };
 }
 
-async function setup({ owner = "poster-1", submission = cleaningSubmission() } = {}) {
+async function setup({ owner = "poster-1", submission = cleaningSubmission(), confirm = confirmGeneralCleaningDraft } = {}) {
   await recordSafetyDecision({ db, operatorRef: "narrow-safety-operator", subjectRef: owner,
     state: "CLEAR", reasonCode: "REVIEWED_CLEAR", expectedVersion: 0,
     validUntil: new Date("2026-09-26T12:00:00Z"),
     authorizeSafetyOperator: async (ref) => ref === "narrow-safety-operator", now });
-  const draft = await confirmGeneralCleaningDraft({ db, actorRef: owner,
-    intentKey: `cleaning-draft-${owner}-1`, expectedVersion: 0, submission, now });
+  const draft = await confirm({ db, actorRef: owner,
+    intentKey: `cleaning-draft-${owner}-1`, expectedVersion: 0, taskSchemaVersion: 2, submission, now });
   const location = await recordProtectedNYCAddress({ db,
     authenticatedOwnerRef: owner, intentKey: `cleaning-location-${owner}-1`,
     address: { house_number: "123", street: "Example Street", zip_code: "10451" },
@@ -80,6 +80,37 @@ function publish(command, overrides = {}) {
   return publishGeneralCleaningJob({ db, auth, authContext: { uid: "poster-1" },
     command, controls, now, ...overrides });
 }
+
+test("generic confirmation passes variable cleaning facts into unchanged free publication", async () => {
+  const submission = cleaningSubmission();
+  submission.scope = { areas_items: ["bedroom"], cleaning_level: "DEEP", approximate_scale: "one room" };
+  submission.title = "Clean bedroom";
+  submission.description = "Deep cleaning of bedroom.";
+  const { draft, command } = await setup({ submission, confirm: confirmJobDraft });
+  const receipt = await publish(command);
+  const job = (await db.collection("v2PublishedJobs").doc(receipt.job_ref).get()).data();
+  const privateJob = (await db.collection("v2PublishedJobPrivate").doc(receipt.job_ref).get()).data();
+  assert.equal(job.title, submission.title);
+  assert.equal(job.description, submission.description);
+  assert.equal(privateJob.confirmed_posting_facts_ref, draft.confirmed_posting_facts_ref);
+  assert.equal(privateJob.draft_version, draft.draft_version);
+  assert.equal(receipt.financial_state, "NOT_REQUIRED_YET");
+  assert.equal(receipt.payment_or_funding_record_created, false);
+  for (const collection of ["payments", "stripe_customers", "v2FundingSnapshots"]) {
+    assert.equal((await db.collection(collection).get()).size, 0);
+  }
+});
+
+test("generic confirmation concurrent retry creates one owner-bound version and rejects conflicting retry", async () => {
+  const args = { db, actorRef: "poster-1", intentKey: "generic-concurrent-intent",
+    expectedVersion: 0, taskSchemaVersion: 2, submission: cleaningSubmission(), now };
+  const [first, second] = await Promise.all([confirmJobDraft(args), confirmJobDraft(args)]);
+  assert.deepEqual(first, second);
+  assert.equal(first.draft_version, 1);
+  assert.equal((await db.collection("v2PostingDrafts").get()).size, 1);
+  await assert.rejects(confirmJobDraft({ ...args,
+    submission: { ...args.submission, title: "General Cleaning" } }), /DRAFT_VERSION_CONFLICT/);
+});
 
 test("authenticated callable reaches the transaction; unauthenticated and forged owner do not", async () => {
   const { command } = await setup();

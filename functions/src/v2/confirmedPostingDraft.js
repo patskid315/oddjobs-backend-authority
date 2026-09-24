@@ -5,36 +5,18 @@ const { commandPayloadDigest } = require("./foundation");
 const { TAXONOMY_VERSION } = require("./publicationPrerequisites");
 const { POLICY_VERSION, OUTCOME, evaluateTaskScopePolicy } = require("./taskScopePolicy");
 
-// Internal backend-only draft source for the first ordinary-job path. It does
-// not publish, verify the truth of poster statements, or clear unstructured
-// text. A future authenticated command handler must supply actorRef from its
-// verified server context, never from a request body's owner field.
-const DRAFT_SCHEMA_VERSION = 2;
+const { plain, exactKeys, validText } = require("./confirmedFactValidation");
+const { taskValidator } = require("./taskValidatorRegistry");
+
+// Shared authenticated confirmation authority. Publication remains a separate
+// command. No caller-supplied policy, source stamp, or derived version is trusted.
+const DRAFT_SCHEMA_VERSION = 3;
 const COLLECTION = "v2PostingDrafts";
-const CLEANING_SCOPE_KEYS = ["areas_items", "cleaning_level", "approximate_scale",
-  "room_count", "supplies_responsibility", "condition_hazards"];
-const CLEANING_RISK_KEYS = ["medical_or_intimate_care", "hazardous_materials",
-  "pest_control", "chemical_risk", "unknown_conditions"];
-
-function plain(value) {
-  return value !== null && typeof value === "object" && !Array.isArray(value) &&
-    Object.getPrototypeOf(value) === Object.prototype;
-}
-
-function exactKeys(value, keys) {
-  return plain(value) && Object.keys(value).length === keys.length &&
-    keys.every((key) => Object.hasOwn(value, key));
-}
 
 function validRef(value) {
   return typeof value === "string" && value.trim() === value &&
     value.length > 0 && value.length <= 128 && !value.includes("/") &&
     value !== "." && value !== "..";
-}
-
-function validText(value, max, allowEmpty = false) {
-  return typeof value === "string" && value.length <= max &&
-    (allowEmpty || value.trim().length > 0) && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value);
 }
 
 function validSchedule(window, duration) {
@@ -53,49 +35,18 @@ function draftRefFor(actorRef, intentKey) {
   return crypto.createHash("sha256").update(joined).digest("hex");
 }
 
-// The first publishable local scope contains no interpolated poster text.
-// All other cleaning drafts retain their text for manual clarification.
-function reconciledText(content) {
-  const scope = content.scope;
-  return scope.areas_items.length === 2 &&
-    scope.areas_items[0] === "kitchen" && scope.areas_items[1] === "bathroom" &&
-    scope.cleaning_level === "STANDARD" &&
-    scope.approximate_scale === "two rooms" && scope.room_count === 2 &&
-    scope.supplies_responsibility === "POSTER_PROVIDES" &&
-    scope.condition_hazards === "NONE_CONFIRMED" &&
-    content.title === "Clean kitchen and bathroom" &&
-    content.description === "Standard cleaning of kitchen and bathroom. Poster provides supplies." &&
-    content.additional_info === "" &&
-    content.conflicting_facts.length === 0 &&
-    content.additional_task_type_ids.length === 0 &&
-    content.prohibited_scope_codes.length === 0 &&
-    CLEANING_RISK_KEYS.every((key) => content.risk_facts[key] === "ABSENT_CONFIRMED");
-}
-
-function normalizedSubmission(submission) {
+function normalizedSubmission(submission, validator) {
   if (!exactKeys(submission, ["task_type_id", "taxonomy_version", "title", "description",
     "additional_info", "duration_minutes", "schedule_window", "scope", "risk_facts", "conflicting_facts",
     "additional_task_type_ids", "prohibited_scope_codes"]) ||
-      submission.task_type_id !== "general_cleaning" ||
+      !validator || submission.task_type_id !== validator.taskTypeId ||
       submission.taxonomy_version !== TAXONOMY_VERSION ||
       !validText(submission.title, 160) || !validText(submission.description, 5000) ||
       !validText(submission.additional_info, 5000, true) ||
       !Number.isSafeInteger(submission.duration_minutes) ||
       submission.duration_minutes < 30 || submission.duration_minutes > 720 ||
       !validSchedule(submission.schedule_window, submission.duration_minutes) ||
-      !exactKeys(submission.scope, CLEANING_SCOPE_KEYS) ||
-      !exactKeys(submission.risk_facts, CLEANING_RISK_KEYS) ||
-      !Array.isArray(submission.scope.areas_items) ||
-      submission.scope.areas_items.length > 20 ||
-      !submission.scope.areas_items.every((value) => validText(value, 120)) ||
-      !validText(submission.scope.cleaning_level, 40, true) ||
-      !validText(submission.scope.approximate_scale, 120, true) ||
-      !(submission.scope.room_count === null ||
-        (Number.isSafeInteger(submission.scope.room_count) &&
-          submission.scope.room_count >= 0 && submission.scope.room_count <= 100)) ||
-      !validText(submission.scope.supplies_responsibility, 40, true) ||
-      !validText(submission.scope.condition_hazards, 120, true) ||
-      !CLEANING_RISK_KEYS.every((key) => validText(submission.risk_facts[key], 80, true)) ||
+      !validator.validShape(submission.scope, submission.risk_facts) ||
       ![submission.conflicting_facts, submission.additional_task_type_ids,
         submission.prohibited_scope_codes].every((values) => Array.isArray(values) &&
           values.length <= 20 && values.every((value) => validText(value, 120)))) {
@@ -111,9 +62,9 @@ function normalizedSubmission(submission) {
   return clone;
 }
 
-function factsForPolicy(submission, confirmedAt) {
+function factsForPolicy(submission, confirmedAt, schemaVersion) {
   return { confirmation: { source: "POSTER_CONFIRMED", confirmed_at: confirmedAt,
-    fact_schema_version: 1 }, scope: submission.scope,
+    fact_schema_version: schemaVersion }, scope: submission.scope,
   risk_facts: submission.risk_facts, conflicting_facts: submission.conflicting_facts,
   additional_task_type_ids: submission.additional_task_type_ids,
   prohibited_scope_codes: submission.prohibited_scope_codes };
@@ -127,17 +78,22 @@ function receipt(record) {
     text_reconciliation_state: record.text_reconciliation_state });
 }
 
-async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVersion,
-  submission, now = new Date() }) {
+async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
+  submission, taskSchemaVersion, now = new Date() }) {
   if (!db || typeof db.runTransaction !== "function" || !validRef(actorRef) ||
       typeof intentKey !== "string" || intentKey.trim() !== intentKey ||
       intentKey.length < 16 || intentKey.length > 200 ||
-      !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 ||
+      !Number.isSafeInteger(expectedVersion) || expectedVersion < 0 || expectedVersion === Number.MAX_SAFE_INTEGER ||
       !(now instanceof Date) || !Number.isFinite(now.getTime())) {
     throw new Error("DRAFT_AUTHORITY_UNAVAILABLE");
   }
-  const content = normalizedSubmission(submission);
+  const validator = taskValidator(submission && submission.task_type_id,
+    submission && submission.taxonomy_version, taskSchemaVersion);
+  // Schema 1 is retained only to verify/replay existing persisted records.
+  if (!validator || !validator.acceptsConfirmation) throw new Error("DRAFT_INPUT_INVALID");
+  const content = normalizedSubmission(submission, validator);
   const contentDigest = commandPayloadDigest(content);
+  const requestDigest = commandPayloadDigest({ task_schema_version: taskSchemaVersion, submission: content });
   const draftRef = draftRefFor(actorRef, intentKey);
   const ref = db.collection(COLLECTION).doc(draftRef);
   return db.runTransaction(async (tx) => {
@@ -149,8 +105,9 @@ async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVe
       throw new Error("DRAFT_VERSION_CONFLICT");
     }
     if (prior && prior.draft_version === expectedVersion + 1 &&
-        prior.content_digest === contentDigest) {
-      await readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, prior.draft_version);
+        prior.content_digest === contentDigest &&
+        (prior.schema_version === 2 || prior.request_digest === requestDigest)) {
+      await readCurrentConfirmedDraft(tx, db, draftRef, actorRef, prior.draft_version);
       return receipt(prior);
     }
     if ((prior ? prior.draft_version : 0) !== expectedVersion) {
@@ -162,22 +119,25 @@ async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVe
     const confirmedAt = now.toISOString();
     const policy = evaluateTaskScopePolicy({ policyVersion: POLICY_VERSION,
       taskTypeId: content.task_type_id, taxonomyVersion: content.taxonomy_version,
-      confirmedFacts: factsForPolicy(content, confirmedAt) });
+      confirmedFacts: factsForPolicy(content, confirmedAt, validator.schemaVersion) });
     const record = { record_type: "V2_CONFIRMED_POSTING_DRAFT",
       draft_ref: draftRef, owner_ref: actorRef, draft_version: expectedVersion + 1,
       schema_version: DRAFT_SCHEMA_VERSION, policy_version: POLICY_VERSION,
+      task_validator_version: validator.validatorVersion,
+      text_rule_version: validator.textRuleVersion,
       task_type_id: content.task_type_id, taxonomy_version: content.taxonomy_version,
       content_digest: contentDigest,
+      request_digest: requestDigest,
       text_digest: commandPayloadDigest({ title: content.title,
         description: content.description, additional_info: content.additional_info }),
       title: content.title, description: content.description,
       additional_info: content.additional_info,
       duration_minutes: content.duration_minutes,
       schedule_window: content.schedule_window,
-      confirmed_facts: factsForPolicy(content, confirmedAt),
+      confirmed_facts: factsForPolicy(content, confirmedAt, validator.schemaVersion),
       policy_outcome: policy.outcome, policy_reason_codes: [...policy.reason_codes],
       text_reconciliation_state: policy.outcome === OUTCOME.SUPPORTED &&
-        reconciledText(content) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
+        validator.reconciledText(content) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
       confirmed_at: confirmedAt, updated_at: now,
       created_at: prior ? prior.created_at : now };
     tx.set(ref, record);
@@ -185,7 +145,7 @@ async function confirmGeneralCleaningDraft({ db, actorRef, intentKey, expectedVe
   });
 }
 
-async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, expectedVersion) {
+async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVersion) {
   if (!tx || !db || !validRef(draftRef) || !validRef(actorRef) ||
       !Number.isSafeInteger(expectedVersion) || expectedVersion < 1) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
@@ -195,9 +155,8 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
   if (!record || record.record_type !== "V2_CONFIRMED_POSTING_DRAFT" ||
       record.draft_ref !== draftRef || record.owner_ref !== actorRef ||
       record.draft_version !== expectedVersion ||
-      record.schema_version !== DRAFT_SCHEMA_VERSION ||
+      ![2, DRAFT_SCHEMA_VERSION].includes(record.schema_version) ||
       record.policy_version !== POLICY_VERSION ||
-      record.task_type_id !== "general_cleaning" ||
       record.taxonomy_version !== TAXONOMY_VERSION ||
       !["UNRESOLVED", "CLEARED_EXACT_TEMPLATE_V1"].includes(record.text_reconciliation_state) ||
       !validText(record.title, 160) || !validText(record.description, 5000) ||
@@ -214,6 +173,11 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
       record.confirmed_facts.confirmation.confirmed_at !== record.confirmed_at) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
+  const validator = taskValidator(record.task_type_id, record.taxonomy_version,
+    record.confirmed_facts.confirmation.fact_schema_version);
+  if (!validator || (record.schema_version === 2 ? validator.schemaVersion !== 1 :
+    !validator.acceptsConfirmation || record.task_validator_version !== validator.validatorVersion ||
+    record.text_rule_version !== validator.textRuleVersion)) throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   const submission = { task_type_id: record.task_type_id,
     taxonomy_version: record.taxonomy_version, title: record.title,
     description: record.description, additional_info: record.additional_info,
@@ -222,7 +186,11 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
     conflicting_facts: record.confirmed_facts.conflicting_facts,
     additional_task_type_ids: record.confirmed_facts.additional_task_type_ids,
     prohibited_scope_codes: record.confirmed_facts.prohibited_scope_codes };
-  if (record.content_digest !== commandPayloadDigest(submission)) {
+  try { normalizedSubmission(submission, validator); }
+  catch { throw new Error("CONFIRMED_DRAFT_UNAVAILABLE"); }
+  if (record.content_digest !== commandPayloadDigest(submission) ||
+      record.schema_version === DRAFT_SCHEMA_VERSION && record.request_digest !==
+        commandPayloadDigest({ task_schema_version: validator.schemaVersion, submission })) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   const policy = evaluateTaskScopePolicy({ policyVersion: POLICY_VERSION,
@@ -231,11 +199,11 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
   if (policy.outcome !== record.policy_outcome ||
       JSON.stringify(policy.reason_codes) !== JSON.stringify(record.policy_reason_codes) ||
       record.text_reconciliation_state !== (policy.outcome === OUTCOME.SUPPORTED &&
-        reconciledText(submission) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED")) {
+        validator.reconciledText(submission) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED")) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   return { draft_ref: draftRef, draft_version: expectedVersion,
-    owner_ref: actorRef, title: record.title, description: record.description,
+    owner_ref: actorRef, task_type_id: record.task_type_id, title: record.title, description: record.description,
     additional_info: record.additional_info,
     duration_minutes: record.duration_minutes, schedule_window: record.schedule_window,
     confirmed_facts: record.confirmed_facts,
@@ -244,5 +212,19 @@ async function readCurrentConfirmedCleaningDraft(tx, db, draftRef, actorRef, exp
     text_reconciliation_state: record.text_reconciliation_state };
 }
 
-module.exports = { DRAFT_SCHEMA_VERSION, confirmGeneralCleaningDraft,
-  readCurrentConfirmedCleaningDraft };
+// Compatibility adapters for the existing cleaning callable and T01 reader.
+// The legacy clearance token remains a wire token for deterministic template
+// reconciliation; persisted validator/text-rule versions identify the grammar.
+function confirmGeneralCleaningDraft(args) {
+  if (!args || !args.submission || args.submission.task_type_id !== "general_cleaning") {
+    throw new Error("DRAFT_INPUT_INVALID");
+  }
+  return confirmJobDraft({ ...args, taskSchemaVersion: 2 });
+}
+async function readCurrentConfirmedCleaningDraft(...args) {
+  const record = await readCurrentConfirmedDraft(...args);
+  if (record.task_type_id !== "general_cleaning") throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
+  return record;
+}
+module.exports = { DRAFT_SCHEMA_VERSION, confirmJobDraft, confirmGeneralCleaningDraft,
+  readCurrentConfirmedDraft, readCurrentConfirmedCleaningDraft };
