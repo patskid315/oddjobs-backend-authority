@@ -82,6 +82,20 @@ function compatiblePhrase(value, scope, templates) {
     areas.every((area) => ORDINARY_AREAS.has(area) && scope.areas_items.includes(area));
 }
 
+// Revision 4 composes only fixed productions. Every match consumes the whole
+// comparison copy; extracted assertions can constrain, never supply, facts.
+function compositionalPhrase(value, scope, templates) {
+  if (compatiblePhrase(value, scope, templates)) return true;
+  const text = comparisonText(value);
+  const need = /^i (?:just )?need (?:some )?(?:(general|standard|deep) )?cleaning(?: for my (?:apartment|home))?$/.exec(text);
+  if (need) return !need[1] || need[1] === "general" || need[1].toUpperCase() === scope.cleaning_level;
+  const action = /^(?:looking for someone to )?(clean|deep clean) (?:my|the) (.+)$/.exec(text);
+  if (!action || action[1] === "deep clean" && scope.cleaning_level !== "DEEP") return false;
+  const areas = action[2].split(" and ");
+  return new Set(areas).size === areas.length && areas.length === scope.areas_items.length &&
+    areas.every((area) => ORDINARY_AREAS.has(area) && scope.areas_items.includes(area));
+}
+
 function reconciledText(content, schemaVersion, textRevision) {
   if (schemaVersion === 1) return legacyText(content);
   const scope = content.scope;
@@ -99,6 +113,10 @@ function reconciledText(content, schemaVersion, textRevision) {
   const descriptions = [description, `${description} Scope: ${scope.approximate_scale}.`];
   if (supplyText) descriptions.push(...descriptions.map((text) => `${text} ${supplyText}`));
   const titles = [`Clean ${areas}`, `${level} cleaning of ${areas}`, "General Cleaning"];
+  if (textRevision === 4) {
+    return compositionalPhrase(content.title, scope, titles) &&
+      compositionalPhrase(content.description, scope, descriptions) && content.additional_info === "";
+  }
   if (textRevision === 3) {
     return compatiblePhrase(content.title, scope, titles) &&
       compatiblePhrase(content.description, scope, descriptions) && content.additional_info === "";
@@ -116,4 +134,5 @@ function validator(schemaVersion, textRevision = schemaVersion) {
     materialFactsResolved: (scope, risks) => materialFactsResolved(scope, risks, schemaVersion),
     reconciledText: (content) => reconciledText(content, schemaVersion, textRevision) });
 }
-module.exports = { cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3) };
+module.exports = { cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3),
+  cleaningV2Text4: validator(2, 4) };
