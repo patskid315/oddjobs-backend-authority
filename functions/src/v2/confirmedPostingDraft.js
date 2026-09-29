@@ -174,7 +174,8 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   const validator = taskValidator(record.task_type_id, record.taxonomy_version,
-    record.confirmed_facts.confirmation.fact_schema_version);
+    record.confirmed_facts.confirmation.fact_schema_version,
+    record.schema_version === 2 ? "cleaning-text-1" : record.text_rule_version);
   if (!validator || (record.schema_version === 2 ? validator.schemaVersion !== 1 :
     !validator.acceptsConfirmation || record.task_validator_version !== validator.validatorVersion ||
     record.text_rule_version !== validator.textRuleVersion)) throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");

@@ -51,7 +51,7 @@ test("generic dispatch records schema, validator, text, policy and poster proven
   assert.equal(record.taxonomy_version, 2);
   assert.equal(record.task_type_id, "general_cleaning");
   assert.equal(record.task_validator_version, "general-cleaning-2");
-  assert.equal(record.text_rule_version, "cleaning-text-2");
+  assert.equal(record.text_rule_version, "cleaning-text-3");
   assert.equal(record.policy_version, POLICY_VERSION);
   assert.deepEqual(record.confirmed_facts.confirmation, { source: "POSTER_CONFIRMED",
     confirmed_at: now.toISOString(), fact_schema_version: 2 });
@@ -124,7 +124,6 @@ test("unmatched text and conflicts cannot bypass structured facts, including int
     { scope: { ...submission().scope, approximate_scale: "one room plus medical care" } },
     { scope: { ...submission().scope, areas_items: ["bedroom and remove asbestos"] },
       title: "Clean bedroom and remove asbestos", description: "Deep cleaning of bedroom and remove asbestos." },
-    { title: "Clean bedroom\n", description: "Deep cleaning of bedroom.\n" },
     { title: "Clean medical equipment", description: "Deep cleaning of medical equipment.",
       scope: { ...submission().scope, areas_items: ["medical equipment"] } }
   ];
@@ -240,4 +239,95 @@ test("legacy records cannot gain broader clearance merely by being read or retri
   assert.equal(replay.text_reconciliation_state, "UNRESOLVED");
   assert.equal((await read(first)).text_reconciliation_state, "UNRESOLVED");
   assert.equal([...records.values()][0].schema_version, 2);
+});
+
+
+test("text revision 3 clears approved whole phrases independently in title and description", async () => {
+  const phrases = ["General Apartment cleaning", "Apartment cleaning", "Need my apartment cleaned",
+    "General cleaning", "Looking for someone to clean my kitchen and bathroom"];
+  for (const phrase of phrases) {
+    for (const field of ["title", "description"]) {
+      const s = setup();
+      const value = { ...submission(), title: "General Cleaning", description: "Standard cleaning of kitchen and bathroom.",
+        scope: { areas_items: ["kitchen", "bathroom"], cleaning_level: "STANDARD", approximate_scale: "two rooms" },
+        [field]: phrase };
+      const original = structuredClone(value);
+      const receipt = await confirmJobDraft(s.args(value));
+      assert.equal(receipt.text_reconciliation_state, clear);
+      const record = [...s.records.values()][0];
+      assert.equal(record.text_rule_version, "cleaning-text-3");
+      assert.equal(record.confirmed_facts.confirmation.fact_schema_version, 2);
+      assert.equal(record.title, original.title); assert.equal(record.description, original.description);
+      assert.equal(record.content_digest, commandPayloadDigest(original));
+      assert.equal(record.text_digest, commandPayloadDigest({ title: original.title,
+        description: original.description, additional_info: original.additional_info }));
+      await s.read(receipt);
+    }
+  }
+});
+
+test("limited normalization and exact area sets; no clauses or unknown prose", async () => {
+  const accepted = ["GENERAL   APARTMENT cleaning!", "Apartment cleaning?", "General cleaning.",
+    "Looking for someone to clean my bathroom and kitchen", "General cleaning\n"];
+  const rejected = ["Clean my apartment and remove black mold", "Clean the bathroom and spray for roaches",
+    "General cleaning and help administer medication", "Apartment cleaning and babysitting",
+    "Apartment cleaning. Also do laundry.", "Need my apartment cleaned except the kitchen",
+    "Make everything nice", "General cleaning!!", "Looking for someone to clean my kitchen",
+    "Looking for someone to clean my kitchen and bathroom and bedroom",
+    "Looking for someone to clean my kitchen and kitchen", "Not general cleaning"];
+  for (const text of [...accepted, ...rejected]) {
+    for (const field of ["title", "description"]) {
+      const s = setup(); const value = { ...submission(), title: "General cleaning", description: "Apartment cleaning",
+        scope: { areas_items: ["kitchen", "bathroom"], cleaning_level: "STANDARD", approximate_scale: "two rooms" },
+        [field]: text };
+      const receipt = await confirmJobDraft(s.args(value));
+      assert.equal(receipt.text_reconciliation_state, accepted.includes(text) ? clear : "UNRESOLVED", text);
+    }
+  }
+});
+
+test("generic text cannot replace structured facts, safety or explicit confirmation", async () => {
+  for (const patch of [{ areas_items: [] }, { cleaning_level: "" }, { approximate_scale: "" }]) {
+    const s = setup(); const value = submission();
+    value.title = value.description = "General cleaning"; Object.assign(value.scope, patch);
+    assert.equal((await confirmJobDraft(s.args(value))).text_reconciliation_state, "UNRESOLVED");
+  }
+  const s = setup(); const value = submission(); value.title = value.description = "General cleaning";
+  value.risk_facts.chemical_risk = "UNKNOWN";
+  assert.equal((await confirmJobDraft(s.args(value))).text_reconciliation_state, "UNRESOLVED");
+  const fresh = setup(); const receipt = await confirmJobDraft(fresh.args());
+  const record = [...fresh.records.values()][0]; record.confirmed_facts.confirmation.source = "CLIENT_INFERRED";
+  await assert.rejects(fresh.read(receipt), /CONFIRMED_DRAFT_UNAVAILABLE/);
+});
+
+test("historical unresolved results replay unchanged; explicit reconfirmation uses new rule", async () => {
+  const s = setup(); const value = submission(); value.title = value.description = "General Apartment cleaning";
+  const current = await confirmJobDraft(s.args(value));
+  const record = [...s.records.values()][0];
+  // Schema-3/fact-schema-2 historical fixture with its original text-rule result.
+  const { cleaningV2 } = require("../src/v2/generalCleaningValidator");
+  assert.equal(cleaningV2.reconciledText(value), false);
+  record.text_rule_version = "cleaning-text-2"; record.text_reconciliation_state = "UNRESOLVED";
+  const snapshot = structuredClone(record);
+  assert.equal((await s.read(current)).text_reconciliation_state, "UNRESOLVED");
+  const retry = await confirmJobDraft(s.args(value));
+  assert.equal(retry.draft_ref, current.draft_ref); assert.equal(retry.draft_version, 1);
+  assert.equal(retry.text_reconciliation_state, "UNRESOLVED");
+  assert.deepEqual([...s.records.values()][0], snapshot);
+  const reconfirm = await confirmJobDraft({ ...s.args(value), expectedVersion: 1 });
+  assert.equal(reconfirm.draft_ref, current.draft_ref); assert.equal(reconfirm.draft_version, 2);
+  assert.equal(reconfirm.text_reconciliation_state, clear);
+  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-3");
+  assert.deepEqual(await confirmJobDraft({ ...s.args(value), expectedVersion: 1 }), reconfirm);
+});
+
+test("historical cleared templates remain readable; unknown rule revisions fail closed", async () => {
+  const s = setup(); const receipt = await confirmJobDraft(s.args());
+  const record = [...s.records.values()][0]; record.text_rule_version = "cleaning-text-2";
+  assert.equal((await s.read(receipt)).text_reconciliation_state, clear);
+  for (const revision of ["cleaning-text-99", "cleaning-text-1", null, undefined]) {
+    record.text_rule_version = revision;
+    await assert.rejects(s.read(receipt), /CONFIRMED_DRAFT_UNAVAILABLE/);
+    await assert.rejects(confirmJobDraft(s.args()), /CONFIRMED_DRAFT_UNAVAILABLE/);
+  }
 });

@@ -64,7 +64,25 @@ function boundedScale(scope) {
   const namedRooms = scope.areas_items.filter((area) => !["floors", "counters"].includes(area)).length;
   return count >= namedRooms && (scope.room_count == null || scope.room_count === count);
 }
-function reconciledText(content, schemaVersion) {
+// Comparison copies only: ASCII whitespace, case and one terminal . ! or ?.
+// Never strip clauses or scan for "safe" keywords inside unknown prose.
+function comparisonText(value) {
+  return value.toLowerCase().replace(/[ \t\r\n]+/g, " ").trim().replace(/[.!?]$/, "").trim();
+}
+const GENERIC_CLEANING = new Set(["general apartment cleaning", "apartment cleaning",
+  "need my apartment cleaned", "general cleaning"]);
+function compatiblePhrase(value, scope, templates) {
+  const text = comparisonText(value);
+  if (GENERIC_CLEANING.has(text) || templates.some((template) => comparisonText(template) === text)) return true;
+  const match = /^looking for someone to clean my (.+)$/.exec(text);
+  if (!match) return false;
+  // The only list separator is " and "; every complete token must be known.
+  const areas = match[1].split(" and ");
+  return new Set(areas).size === areas.length && areas.length === scope.areas_items.length &&
+    areas.every((area) => ORDINARY_AREAS.has(area) && scope.areas_items.includes(area));
+}
+
+function reconciledText(content, schemaVersion, textRevision) {
   if (schemaVersion === 1) return legacyText(content);
   const scope = content.scope;
   if (!materialFactsResolved(scope, content.risk_facts, schemaVersion) ||
@@ -80,17 +98,22 @@ function reconciledText(content, schemaVersion) {
     SHARED: "Both parties provide supplies." }[scope.supplies_responsibility];
   const descriptions = [description, `${description} Scope: ${scope.approximate_scale}.`];
   if (supplyText) descriptions.push(...descriptions.map((text) => `${text} ${supplyText}`));
-  return [`Clean ${areas}`, `${level} cleaning of ${areas}`, "General Cleaning"].includes(content.title) &&
+  const titles = [`Clean ${areas}`, `${level} cleaning of ${areas}`, "General Cleaning"];
+  if (textRevision === 3) {
+    return compatiblePhrase(content.title, scope, titles) &&
+      compatiblePhrase(content.description, scope, descriptions) && content.additional_info === "";
+  }
+  return titles.includes(content.title) &&
     descriptions.includes(content.description) && content.additional_info === "";
 }
 
-function validator(schemaVersion) {
+function validator(schemaVersion, textRevision = schemaVersion) {
   return Object.freeze({ taskTypeId: "general_cleaning", schemaVersion,
     acceptsConfirmation: schemaVersion === 2,
-    validatorVersion: `general-cleaning-${schemaVersion}`, textRuleVersion: `cleaning-text-${schemaVersion}`,
+    validatorVersion: `general-cleaning-${schemaVersion}`, textRuleVersion: `cleaning-text-${textRevision}`,
     supportedReason: "ORDINARY_CONFIRMED_CLEANING_SCOPE",
     validShape: (scope, risks) => validShape(scope, risks, schemaVersion),
     materialFactsResolved: (scope, risks) => materialFactsResolved(scope, risks, schemaVersion),
-    reconciledText: (content) => reconciledText(content, schemaVersion) });
+    reconciledText: (content) => reconciledText(content, schemaVersion, textRevision) });
 }
-module.exports = { cleaningV1: validator(1), cleaningV2: validator(2) };
+module.exports = { cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3) };
