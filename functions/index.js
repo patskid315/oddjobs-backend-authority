@@ -5,6 +5,7 @@ const {createCompletionHandler}=require("./src/settlement/completionHandler");
 const {createPublicationCallable}=require("./src/v2/publicationCallable");
 const {createConfirmedDraftCallable,createJobDraftCallable}=require("./src/v2/confirmedDraftCallable");
 const {createProtectedLocationCallable}=require("./src/v2/protectedLocationCallable");
+const {createSafetyDecisionCallable}=require("./src/v2/safetyDecisionCallable");
 if(!admin.apps.length)admin.initializeApp();
 const repository=new FirestoreSettlementRepository({db:admin.firestore()});
 const completionHandler=createCompletionHandler({repository,logger:functions.logger});
@@ -33,5 +34,10 @@ exports.confirmV2JobDraft=functions.https.onCall(createJobDraftCallable({
 exports.recordV2ProtectedLocation=functions.runWith({
   secrets:["NYC_GEOCLIENT_SUBSCRIPTION_KEY"]
 }).https.onCall(createProtectedLocationCallable({
+  db:admin.firestore(),HttpsError:functions.https.HttpsError
+}));
+
+// Dedicated server-configured privilege; never legacy admin or request claims.
+exports.recordV2SafetyDecision=functions.https.onCall(createSafetyDecisionCallable({
   db:admin.firestore(),HttpsError:functions.https.HttpsError
 }));
