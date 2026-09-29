@@ -98,7 +98,10 @@ function compositionalPhrase(value, scope, templates) {
 
 function reconciledText(content, schemaVersion, textRevision) {
   if (schemaVersion === 1) return legacyText(content);
-  const scope = content.scope;
+  // Revision 5 changes comparison identity only. Persisted facts and digests
+  // retain the exact submitted strings; prior revisions never take this branch.
+  const scope = textRevision === 5 ? { ...content.scope,
+    areas_items: content.scope.areas_items.map((area) => area.trim().toLowerCase()) } : content.scope;
   if (!materialFactsResolved(scope, content.risk_facts, schemaVersion) ||
       new Set(scope.areas_items).size !== scope.areas_items.length ||
       !scope.areas_items.every((area) => ORDINARY_AREAS.has(area)) || !boundedScale(scope)) return false;
@@ -113,7 +116,7 @@ function reconciledText(content, schemaVersion, textRevision) {
   const descriptions = [description, `${description} Scope: ${scope.approximate_scale}.`];
   if (supplyText) descriptions.push(...descriptions.map((text) => `${text} ${supplyText}`));
   const titles = [`Clean ${areas}`, `${level} cleaning of ${areas}`, "General Cleaning"];
-  if (textRevision === 4) {
+  if (textRevision === 4 || textRevision === 5) {
     return compositionalPhrase(content.title, scope, titles) &&
       compositionalPhrase(content.description, scope, descriptions) && content.additional_info === "";
   }
@@ -135,4 +138,4 @@ function validator(schemaVersion, textRevision = schemaVersion) {
     reconciledText: (content) => reconciledText(content, schemaVersion, textRevision) });
 }
 module.exports = { cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3),
-  cleaningV2Text4: validator(2, 4) };
+  cleaningV2Text4: validator(2, 4), cleaningV2Text5: validator(2, 5) };

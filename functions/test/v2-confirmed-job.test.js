@@ -51,7 +51,7 @@ test("generic dispatch records schema, validator, text, policy and poster proven
   assert.equal(record.taxonomy_version, 2);
   assert.equal(record.task_type_id, "general_cleaning");
   assert.equal(record.task_validator_version, "general-cleaning-2");
-  assert.equal(record.text_rule_version, "cleaning-text-4");
+  assert.equal(record.text_rule_version, "cleaning-text-5");
   assert.equal(record.policy_version, POLICY_VERSION);
   assert.deepEqual(record.confirmed_facts.confirmation, { source: "POSTER_CONFIRMED",
     confirmed_at: now.toISOString(), fact_schema_version: 2 });
@@ -255,7 +255,7 @@ test("current text revision preserves approved whole phrases independently in ti
       const receipt = await confirmJobDraft(s.args(value));
       assert.equal(receipt.text_reconciliation_state, clear);
       const record = [...s.records.values()][0];
-      assert.equal(record.text_rule_version, "cleaning-text-4");
+      assert.equal(record.text_rule_version, "cleaning-text-5");
       assert.equal(record.confirmed_facts.confirmation.fact_schema_version, 2);
       assert.equal(record.title, original.title); assert.equal(record.description, original.description);
       assert.equal(record.content_digest, commandPayloadDigest(original));
@@ -317,7 +317,7 @@ test("historical unresolved results replay unchanged; explicit reconfirmation us
   const reconfirm = await confirmJobDraft({ ...s.args(value), expectedVersion: 1 });
   assert.equal(reconfirm.draft_ref, current.draft_ref); assert.equal(reconfirm.draft_version, 2);
   assert.equal(reconfirm.text_reconciliation_state, clear);
-  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-4");
+  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-5");
   assert.deepEqual(await confirmJobDraft({ ...s.args(value), expectedVersion: 1 }), reconfirm);
 });
 
@@ -354,7 +354,7 @@ test("text revision 4 consumes bounded compositions independently in title and d
       const result = await confirmJobDraft(s.args(value));
       assert.equal(result.text_reconciliation_state, accepted.includes(text) ? clear : "UNRESOLVED", `${field}: ${text}`);
       const record = [...s.records.values()][0];
-      assert.equal(record.text_rule_version, "cleaning-text-4");
+      assert.equal(record.text_rule_version, "cleaning-text-5");
       assert.equal(record.title, original.title); assert.equal(record.description, original.description);
       assert.equal(record.content_digest, commandPayloadDigest(original));
       assert.equal(record.text_digest, commandPayloadDigest({ title: original.title,
@@ -408,8 +408,71 @@ test("historical text-2 and text-3 keep their interpretation and retry result un
       const fresh = await confirmJobDraft({ ...s.args(value), expectedVersion: 1 });
       assert.equal(fresh.draft_ref, current.draft_ref); assert.equal(fresh.draft_version, 2);
       assert.equal(fresh.text_reconciliation_state, clear);
-      assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-4");
+      assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-5");
       assert.deepEqual(await confirmJobDraft({ ...s.args(value), expectedVersion: 1 }), fresh);
     }
+  }
+});
+
+test("text-5 canonicalizes area comparison copies without changing original facts or digests", async () => {
+  for (const areas of [["bedroom"], ["Bedroom"], ["bEdRoOm"], [" \tBedroom\n "]]) {
+    for (const description of ["I just need some deep cleaning for my apartment.",
+      "Looking for someone to clean my bedroom", "Deep cleaning of bedroom."]) {
+      const s = setup(); const value = submission(); value.scope.areas_items = areas;
+      value.title = "General Apartment Cleaning"; value.description = description;
+      const original = structuredClone(value);
+      const result = await confirmJobDraft(s.args(value));
+      assert.equal(result.text_reconciliation_state, clear);
+      const record = [...s.records.values()][0];
+      assert.deepEqual(record.confirmed_facts.scope, original.scope);
+      assert.equal(record.title, original.title); assert.equal(record.description, original.description);
+      assert.equal(record.content_digest, commandPayloadDigest(original));
+      assert.equal(record.text_digest, commandPayloadDigest({ title: original.title,
+        description: original.description, additional_info: original.additional_info }));
+      await s.read(result);
+    }
+  }
+});
+
+test("canonical identities reject duplicates and unknown areas and preserve room counting", async () => {
+  for (const [areas, scale, roomCount, expected] of [
+    [["Bedroom", "bedroom"], "two rooms", null, "UNRESOLVED"],
+    [["Bedroom", " BEDROOM "], "two rooms", null, "UNRESOLVED"],
+    [["Bedroom office thing"], "one room", null, "UNRESOLVED"],
+    [["Bed room"], "one room", null, "UNRESOLVED"],
+    [["Bedroom", "Bathroom"], "one room", null, "UNRESOLVED"],
+    [["Bedroom", "Bathroom"], "two rooms", 1, "UNRESOLVED"],
+    [["Bedroom", "Floors", "Counters"], "one room", 1, clear],
+    [["Bedroom", "Bathroom"], "two rooms", 2, clear]
+  ]) {
+    const s = setup(); const value = submission(); value.title = value.description = "General cleaning";
+    Object.assign(value.scope, { areas_items: areas, approximate_scale: scale, room_count: roomCount });
+    assert.equal((await confirmJobDraft(s.args(value))).text_reconciliation_state, expected);
+  }
+  const s = setup(); const value = submission(); value.scope.areas_items = ["Bathroom", "Bedroom"];
+  value.scope.approximate_scale = "two rooms"; value.title = "General cleaning";
+  value.description = "Clean the bedroom and bathroom";
+  assert.equal((await confirmJobDraft(s.args(value))).text_reconciliation_state, clear);
+});
+
+test("text-4 capitalization remains unresolved on historical read/retry until explicit text-5 reconfirmation", async () => {
+  const { cleaningV2Text4 } = require("../src/v2/generalCleaningValidator");
+  for (const area of ["Bedroom", "bedroom", " Bedroom "]) {
+    const s = setup(); const value = submission(); value.scope.areas_items = [area];
+    value.title = "General Apartment Cleaning";
+    value.description = "I just need some deep cleaning for my apartment.";
+    assert.equal(cleaningV2Text4.reconciledText(value), area === "bedroom");
+    const first = await confirmJobDraft(s.args(value)); const record = [...s.records.values()][0];
+    record.text_rule_version = "cleaning-text-4";
+    record.text_reconciliation_state = area === "bedroom" ? clear : "UNRESOLVED";
+    const snapshot = structuredClone(record);
+    assert.equal((await s.read(first)).text_reconciliation_state, snapshot.text_reconciliation_state);
+    const retry = await confirmJobDraft(s.args(value));
+    assert.equal(retry.draft_version, 1); assert.equal(retry.draft_ref, first.draft_ref);
+    assert.equal(retry.text_reconciliation_state, snapshot.text_reconciliation_state);
+    assert.deepEqual([...s.records.values()][0], snapshot);
+    const next = await confirmJobDraft({ ...s.args(value), expectedVersion: 1 });
+    assert.equal(next.draft_version, 2); assert.equal(next.text_reconciliation_state, clear);
+    assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-5");
   }
 });
