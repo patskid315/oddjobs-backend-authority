@@ -5,7 +5,10 @@ const { PROVIDER_ID } = require("./protectedLocationAuthority");
 
 const BASE_URL = "https://api.nyc.gov/geoclient/v2/";
 const MAX_RESPONSE_BYTES = 262144;
-const failure = (code) => new Error(code);
+const { ProtectedLocationFailure, safeFailure } = require("./protectedLocationErrors");
+const failure = (code, reason = code === "LOCATION_AUTHORITY_UNAVAILABLE" ? "verification_unavailable" :
+  code === "LOCATION_INPUT_INVALID" ? "invalid_address_input" : "invalid_service_response") =>
+  new ProtectedLocationFailure(reason, code);
 const plain = (value) => value !== null && typeof value === "object" &&
   Object.getPrototypeOf(value) === Object.prototype;
 const normalized = (value) => typeof value === "string" ?
@@ -26,25 +29,38 @@ function versionEvidence(body) {
 
 function exactMatch(body, input) {
   const result = body && body.address;
-  // /address is a single Function 1B result, never a /search candidate list.
+  // A usable Function 1B assessment is distinct from malformed evidence.
   if (!plain(body) || Object.keys(body).length !== 1 || !plain(result) ||
       result.geosupportFunctionCode !== "1B" ||
-      result.geosupportReturnCode !== "00" || result.geosupportReturnCode2 !== "00" ||
-      ["returnCode1e", "returnCode1a"].some((key) =>
-        result[key] != null && result[key] !== "00") ||
+      ![result.geosupportReturnCode, result.geosupportReturnCode2].every((v) => typeof v === "string" && /^[0-9]{2}$/.test(v)) ||
+      ["returnCode1e", "returnCode1a"].some((k) => result[k] != null &&
+        (typeof result[k] !== "string" || !/^[0-9]{2}$/.test(result[k]))) ||
       ["reasonCode", "reasonCode2", "reasonCode1e", "reasonCode1a", "message", "message2"]
-        .some((key) => result[key] != null && normalized(result[key]) !== "") ||
-      normalized(result.houseNumber) !== normalized(input.house_number) ||
+        .some((k) => result[k] != null && typeof result[k] !== "string")) {
+    throw failure("LOCATION_VALIDATION_UNRESOLVED");
+  }
+  if (result.geosupportReturnCode !== "00" || result.geosupportReturnCode2 !== "00" ||
+      ["returnCode1e", "returnCode1a"].some((k) => result[k] != null && result[k] !== "00") ||
+      ["reasonCode", "reasonCode2", "reasonCode1e", "reasonCode1a", "message", "message2"]
+        .some((k) => result[k] != null && normalized(result[k]) !== "")) {
+    // Non-success/warning codes are not a qualified geographic diagnosis.
+    // Do not assume a provider failure means the poster's address is wrong.
+    throw failure("LOCATION_VALIDATION_UNRESOLVED");
+  }
+  if (!["houseNumber", "houseNumberIn", "streetName1In", "firstStreetNameNormalized", "zipCode"]
+        .every((k) => typeof result[k] === "string" && normalized(result[k])) ||
       normalized(result.houseNumberIn) !== normalized(input.house_number) ||
       normalized(result.streetName1In) !== normalized(input.street) ||
-      normalized(result.firstStreetNameNormalized) !== normalized(input.street) ||
-      result.zipCode !== input.zip_code ||
+      !/^\d{5}$/.test(result.zipCode) ||
       typeof result.bblBoroughCode !== "string" || !/^[1-5]$/.test(result.bblBoroughCode) ||
       typeof result.bbl !== "string" || !/^[1-5][0-9]{9}$/.test(result.bbl) ||
       result.bbl[0] !== result.bblBoroughCode ||
-      ["boroughCode1In", "lionBoroughCode"].some((key) =>
-        result[key] != null && result[key] !== result.bblBoroughCode)) {
+      ["boroughCode1In", "lionBoroughCode"].some((k) => result[k] != null && result[k] !== result.bblBoroughCode)) {
     throw failure("LOCATION_VALIDATION_UNRESOLVED");
+  }
+  if (normalized(result.houseNumber) !== normalized(input.house_number) ||
+      normalized(result.firstStreetNameNormalized) !== normalized(input.street) || result.zipCode !== input.zip_code) {
+    throw failure("LOCATION_VALIDATION_UNRESOLVED", "address_not_resolved");
   }
   return { borough: result.bblBoroughCode, reference: `bbl:${result.bbl}` };
 }
@@ -65,10 +81,10 @@ function createNYCGeoclientValidator({
           ![[address.house_number, 24], [address.street, 160]].every(([value, max]) =>
             typeof value === "string" && value.length > 0 && value.length <= max &&
             value.trim() === value && !/[\u0000-\u001f\u007f]/.test(value)) ||
-          typeof address.zip_code !== "string" || !/^\d{5}$/.test(address.zip_code) ||
-          inputDigest !== commandPayloadDigest(address)) {
+          typeof address.zip_code !== "string" || !/^\d{5}$/.test(address.zip_code)) {
         throw failure("LOCATION_INPUT_INVALID");
       }
+      if (inputDigest !== commandPayloadDigest(address)) throw failure("LOCATION_INPUT_INVALID", "invalid_service_response");
       // Snapshot before awaiting configuration/HTTP; callers cannot mutate evidence.
       const input = { ...address };
       let key;
@@ -85,25 +101,47 @@ function createNYCGeoclientValidator({
         const url = new URL(path, BASE_URL);
         if (parameters) url.search = new URLSearchParams(parameters).toString();
         try {
-          const response = await fetchImpl(url.toString(), {
+          let response;
+          try { response = await fetchImpl(url.toString(), {
             method: "GET", headers: { Accept: "application/json", "Ocp-Apim-Subscription-Key": key },
             redirect: "error", cache: "no-store", signal: controller.signal
-          });
-          if (response.status !== 200 || response.redirected ||
+          }); } catch (error) {
+            if (controller.signal.aborted || error instanceof TypeError ||
+                ["AbortError", "TimeoutError"].includes(error && error.name)) {
+              throw failure("LOCATION_VALIDATION_UNAVAILABLE", "verification_temporarily_unavailable");
+            }
+            throw safeFailure(error);
+          }
+          if (!response || !Number.isInteger(response.status) || !response.headers ||
+              typeof response.headers.get !== "function") {
+            throw failure("LOCATION_VALIDATION_UNAVAILABLE", "invalid_service_response");
+          }
+          if (response.status === 429) throw failure("LOCATION_VALIDATION_UNAVAILABLE", "rate_limited");
+          if (response.status === 408 || response.status >= 500) throw failure("LOCATION_VALIDATION_UNAVAILABLE", "verification_temporarily_unavailable");
+          if (response.status !== 200) throw failure("LOCATION_VALIDATION_UNAVAILABLE", "verification_unavailable");
+          if (response.redirected ||
               !/^application\/json(?:\s*;|$)/i.test(response.headers.get("content-type") || "")) {
-            throw failure("HTTP_FAILURE");
+            throw failure("LOCATION_VALIDATION_UNAVAILABLE", "invalid_service_response");
+          }
+          if (!response.body || typeof response.body[Symbol.asyncIterator] !== "function") {
+            throw failure("LOCATION_VALIDATION_UNAVAILABLE", "invalid_service_response");
           }
           const chunks = [];
           let size = 0;
           for await (const chunk of response.body) {
             size += chunk.length;
-            if (size > MAX_RESPONSE_BYTES) { controller.abort(); throw failure("RESPONSE_TOO_LARGE"); }
+            if (size > MAX_RESPONSE_BYTES) { controller.abort(); throw failure("LOCATION_VALIDATION_UNAVAILABLE", "invalid_service_response"); }
             chunks.push(Buffer.from(chunk));
           }
-          return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        } catch (_) {
-          // Never propagate HTTP exceptions, headers, URLs, bodies or credentials.
-          throw failure("LOCATION_VALIDATION_UNAVAILABLE");
+          try { return JSON.parse(Buffer.concat(chunks).toString("utf8")); }
+          catch (_) { throw failure("LOCATION_VALIDATION_UNAVAILABLE", "invalid_service_response"); }
+        } catch (error) {
+          if (error instanceof ProtectedLocationFailure) throw error;
+          if (controller.signal.aborted || error instanceof TypeError ||
+              ["AbortError", "TimeoutError"].includes(error && error.name)) {
+            throw failure("LOCATION_VALIDATION_UNAVAILABLE", "verification_temporarily_unavailable");
+          }
+          throw safeFailure(error);
         }
       }
       try {

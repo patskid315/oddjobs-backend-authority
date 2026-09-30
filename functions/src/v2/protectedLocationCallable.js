@@ -1,5 +1,6 @@
 "use strict";
 
+const { ProtectedLocationFailure, publicDetail } = require("./protectedLocationErrors");
 const { recordProtectedNYCAddress } = require("./protectedLocationAuthority");
 const { createNYCGeoclientValidator } = require("./nycGeoclientValidator");
 
@@ -24,23 +25,28 @@ function createProtectedLocationCallable({ db, HttpsError,
         typeof data.intent_key !== "string" || data.intent_key.trim() !== data.intent_key ||
         /[\r\n]/.test(data.intent_key) || data.intent_key.length < 16 || data.intent_key.length > 200 ||
         !address || Object.getPrototypeOf(address) !== Object.prototype ||
-        Object.keys(address).some((key) => !["house_number", "street", "zip_code", "unit"].includes(key)) ||
-        !["house_number", "street", "zip_code"].every((key) =>
+        Object.keys(address).some((key) => !["house_number", "street", "zip_code", "unit"].includes(key))) {
+      throw new HttpsError("invalid-argument", "Check the request and try again.", publicDetail(new ProtectedLocationFailure("unknown")));
+    }
+    if (!["house_number", "street", "zip_code"].every((key) =>
           Object.hasOwn(address, key) && typeof address[key] === "string") ||
         (Object.hasOwn(address, "unit") && address.unit !== null && typeof address.unit !== "string")) {
-      throw new HttpsError("invalid-argument", "Check the address details and try again.");
+      throw new HttpsError("invalid-argument", "Check the address details and try again.", publicDetail(new ProtectedLocationFailure("invalid_address_input")));
     }
     try {
       return await recordProtectedNYCAddress({ db, authenticatedOwnerRef: uid,
         intentKey: data.intent_key, address, validator, now: new Date() });
     } catch (error) {
-      if (error && error.message === "LOCATION_INPUT_INVALID") {
-        throw new HttpsError("invalid-argument", "Check the address details and try again.");
+      const detail = publicDetail(error);
+      if (detail.reason === "invalid_address_input") {
+        throw new HttpsError("invalid-argument", "Check the address details and try again.", detail);
       }
       // Conflicts, unresolved matches and unavailable authority remain failures.
       // Never disclose protected records, provider errors, addresses or secrets,
       // and never claim persistence succeeded after an uncertain response.
-      throw new HttpsError("failed-precondition", "This address cannot be validated right now.");
+      const code = detail.reason === "rate_limited" ? "resource-exhausted" :
+        detail.reason === "verification_temporarily_unavailable" ? "unavailable" : "failed-precondition";
+      throw new HttpsError(code, "This address cannot be validated right now.", detail);
     }
   };
 }

@@ -177,3 +177,35 @@ test("real authority consumes adapter, protects unit, returns only coarse geogra
   await assert.rejects(recordProtectedNYCAddress({ ...args, address: { ...args.address, unit: "OTHER" } }),
     /LOCATION_INTENT_CONFLICT/);
 });
+
+test("typed adapter reasons distinguish non-match, invalid evidence and service failures", async () => {
+  const mismatch = address(); mismatch.address.firstStreetNameNormalized = "OTHER STREET";
+  const noMatch = address(); noMatch.address.geosupportReturnCode = "42";
+  const inconsistent = address(); inconsistent.address.houseNumberIn = "999";
+  for (const [responses, reason] of [
+    [[version(), mismatch], "address_not_resolved"],
+    [[version(), noMatch], "invalid_service_response"],
+    [[version(), inconsistent], "invalid_service_response"],
+    [[version(), {}], "invalid_service_response"],
+    [[{}], "invalid_service_response"],
+    [[json({}, 429)], "rate_limited"], [[json({}, 503)], "verification_temporarily_unavailable"],
+    [[json({}, 408)], "verification_temporarily_unavailable"],
+    [[json({}, 401)], "verification_unavailable"], [[json({}, 403)], "verification_unavailable"],
+    [[new TypeError("private URL")], "verification_temporarily_unavailable"],
+    [[new Error("PRIVATE unexpected exception")], "unknown"],
+    [[new Response("invalid json", { headers: { "content-type": "application/json" } })], "invalid_service_response"]
+  ]) {
+    const { validator } = setup(responses);
+    await assert.rejects(validator.validateExactAddress(input, digest), (error) => {
+      assert.equal(error.reason, reason); assert.ok(!error.message.includes("PRIVATE")); return true;
+    });
+  }
+  const { validator } = setup([], { getSubscriptionKey: () => undefined });
+  await assert.rejects(validator.validateExactAddress(input, digest), (error) => error.reason === "verification_unavailable");
+  const timed = setup([], { timeoutMs: 5, fetchImpl: async (_, { signal }) =>
+    new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(new Error("PRIVATE")), { once: true })) });
+  await assert.rejects(timed.validator.validateExactAddress(input, digest), (error) => error.reason === "verification_temporarily_unavailable");
+  const invalid = setup();
+  await assert.rejects(invalid.validator.validateExactAddress({ ...input, street: "" }, digest), (error) => error.reason === "invalid_address_input");
+  await assert.rejects(invalid.validator.validateExactAddress(input, "wrong-digest"), (error) => error.reason === "invalid_service_response");
+});

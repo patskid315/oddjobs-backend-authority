@@ -1,5 +1,6 @@
 "use strict";
 
+const { ProtectedLocationFailure, safeFailure } = require("./protectedLocationErrors");
 const crypto = require("node:crypto");
 const { commandPayloadDigest } = require("./foundation");
 const { GEOGRAPHY_REGISTRY_VERSION, projectEligibilityGeography } = require("./publicationPrerequisites");
@@ -30,7 +31,7 @@ function normalizedAddress(address) {
       !nonempty(address.house_number, 24) || !nonempty(address.street) ||
       !/^\d{5}$/.test(address.zip_code || "") ||
       (address.unit != null && !nonempty(address.unit, 80))) {
-    throw new Error("LOCATION_INPUT_INVALID");
+    throw new ProtectedLocationFailure("invalid_address_input", "LOCATION_INPUT_INVALID");
   }
   return Object.freeze({ house_number: address.house_number, street: address.street,
     zip_code: address.zip_code, unit: address.unit || null });
@@ -47,13 +48,13 @@ function validatedBorough(result, addressDigest) {
       result.input_digest !== addressDigest || result.status !== "EXACT_ADDRESS" ||
       !Array.isArray(result.matches) || result.matches.length !== 1 ||
       !nonempty(result.dataset_version, 80) || !nonempty(result.provider_reference, 128)) {
-    throw new Error("LOCATION_VALIDATION_UNRESOLVED");
+    throw new ProtectedLocationFailure("invalid_service_response", "LOCATION_VALIDATION_UNRESOLVED");
   }
   const match = result.matches[0];
   if (!match || match.geosupport_return_code !== "00" ||
       match.input_match_confirmed !== true ||
       !Object.hasOwn(BOROUGH_BY_CODE, match.borough_code)) {
-    throw new Error("LOCATION_VALIDATION_UNRESOLVED");
+    throw new ProtectedLocationFailure("invalid_service_response", "LOCATION_VALIDATION_UNRESOLVED");
   }
   return BOROUGH_BY_CODE[match.borough_code];
 }
@@ -77,7 +78,7 @@ async function recordProtectedNYCAddress({ db, authenticatedOwnerRef, intentKey,
       intentKey.length < 16 || !(now instanceof Date) || !Number.isFinite(now.getTime()) ||
       !validator || validator.providerId !== PROVIDER_ID ||
       typeof validator.validateExactAddress !== "function") {
-    throw new Error("LOCATION_AUTHORITY_UNAVAILABLE");
+    throw new ProtectedLocationFailure("verification_unavailable", "LOCATION_AUTHORITY_UNAVAILABLE");
   }
   const exactAddress = normalizedAddress(address);
   const addressDigest = commandPayloadDigest(exactAddress);
@@ -93,8 +94,8 @@ async function recordProtectedNYCAddress({ db, authenticatedOwnerRef, intentKey,
     eligibility_geography: validateExisting(before, authenticatedOwnerRef, locationRef, addressDigest) };
 
   let result;
-  try { result = await validator.validateExactAddress(validationAddress, validationDigest); } catch (_) {
-    throw new Error("LOCATION_VALIDATION_UNAVAILABLE");
+  try { result = await validator.validateExactAddress(validationAddress, validationDigest); } catch (error) {
+    throw safeFailure(error);
   }
   const boroughId = validatedBorough(result, validationDigest);
   const record = {
@@ -121,7 +122,7 @@ async function recordProtectedNYCAddress({ db, authenticatedOwnerRef, intentKey,
     tx.create(ref, record);
     return eligibility;
   });
-  if (!committedGeography) throw new Error("LOCATION_VALIDATION_UNRESOLVED");
+  if (!committedGeography) throw new ProtectedLocationFailure("invalid_service_response", "LOCATION_VALIDATION_UNRESOLVED");
   return { protected_ref: locationRef, eligibility_geography: committedGeography };
 }
 

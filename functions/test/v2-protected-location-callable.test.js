@@ -8,7 +8,7 @@ const { commandPayloadDigest } = require("../src/v2/foundation");
 const { readEligibilityGeography } = require("../src/v2/publicationPrerequisites");
 
 class HttpsError extends Error {
-  constructor(code, message) { super(message); this.code = code; }
+  constructor(code, message, details) { super(message); this.code = code; this.details = details; }
 }
 const context = { auth: { uid: "poster-1" } };
 const request = () => ({ intent_key: "protected-location-intent-1", address: {
@@ -150,4 +150,40 @@ test("provider or secret errors never reach the response or create records", asy
   await assert.rejects(noSecret(request(), context), sanitized);
   assert.equal(httpCalls, 0);
   assert.equal(records.size, 0);
+});
+
+test("public typed reasons survive authority and callable with bounded sanitized details", async () => {
+  const { ProtectedLocationFailure } = require("../src/v2/protectedLocationErrors");
+  for (const reason of ["invalid_address_input", "address_not_resolved", "verification_temporarily_unavailable",
+    "verification_unavailable", "rate_limited", "invalid_service_response", "unknown"]) {
+    const s = setup(async () => { throw new ProtectedLocationFailure(reason); });
+    await assert.rejects(s.handler(request(), context), (error) => {
+      assert.deepEqual(error.details, { domain: "v2_protected_location", version: 1, reason });
+      assert.equal(error.code, reason === "invalid_address_input" ? "invalid-argument" :
+        reason === "rate_limited" ? "resource-exhausted" : reason === "verification_temporarily_unavailable" ? "unavailable" : "failed-precondition");
+      assert.ok(!JSON.stringify(error).includes("PRIVATE"));
+      return true;
+    });
+    assert.equal(s.records.size, 0);
+  }
+});
+
+test("address defects are distinct from command, intent and unexpected failures", async () => {
+  const s = setup();
+  const reason = (expected) => (error) => {
+    assert.deepEqual(error.details, { domain: "v2_protected_location", version: 1, reason: expected });
+    return true;
+  };
+  await assert.rejects(s.handler({ ...request(), address: { ...request().address, street: "" } }, context), reason("invalid_address_input"));
+  await assert.rejects(s.handler({ ...request(), address: { ...request().address, zip_code: 12 } }, context), reason("invalid_address_input"));
+  await assert.rejects(s.handler({ ...request(), owner_ref: "forged" }, context), reason("unknown"));
+  await assert.rejects(s.handler({ ...request(), intent_key: "bad" }, context), reason("unknown"));
+  const first = await s.handler(request(), context);
+  await assert.rejects(s.handler({ ...request(), address: { ...request().address, unit: "changed" } }, context), reason("unknown"));
+  assert.deepEqual(await s.handler(request(), context), first);
+  const unexpected = setup(async () => { throw Object.assign(new Error("PRIVATE secret address"), { reason: "invalid_address_input" }); });
+  await assert.rejects(unexpected.handler(request(), context), (error) => {
+    assert.equal(error.details.reason, "unknown");
+    assert.ok(!JSON.stringify(error).includes("PRIVATE")); return true;
+  });
 });
