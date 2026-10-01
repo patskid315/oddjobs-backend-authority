@@ -17,9 +17,12 @@ function callable({ db, HttpsError, confirm, versioned }) {
     }
     const keys = ["intent_key", "expected_version", "submission"];
     if (versioned) keys.push("task_schema_version");
+    const reviewed = data && Object.hasOwn(data, "confirmation_contract_version");
+    if (reviewed) keys.push("confirmation_contract_version", "scope_review");
     if (!data || Object.getPrototypeOf(data) !== Object.prototype ||
         Object.keys(data).length !== keys.length ||
         !keys.every((key) => Object.hasOwn(data, key)) ||
+        (reviewed && data.confirmation_contract_version !== 2) ||
         (versioned && (!Number.isSafeInteger(data.task_schema_version) || data.task_schema_version < 1)) ||
         typeof data.intent_key !== "string" || data.intent_key.trim() !== data.intent_key ||
         data.intent_key.length < 16 || data.intent_key.length > 200 ||
@@ -30,6 +33,7 @@ function callable({ db, HttpsError, confirm, versioned }) {
     try {
       return await confirm({ db, actorRef: uid, intentKey: data.intent_key,
         expectedVersion: data.expected_version, submission: data.submission,
+        ...(reviewed ? { confirmationContractVersion: 2, scopeReview: data.scope_review } : {}),
         ...(versioned ? { taskSchemaVersion: data.task_schema_version } : {}), now: new Date() });
     } catch (error) {
       if (error && error.message === "DRAFT_INPUT_INVALID") {

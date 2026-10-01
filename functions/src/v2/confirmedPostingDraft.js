@@ -1,6 +1,7 @@
 "use strict";
 
 const crypto = require("node:crypto");
+const { verifyScopeReview } = require("./scopeReview");
 const { commandPayloadDigest } = require("./foundation");
 const { TAXONOMY_VERSION } = require("./publicationPrerequisites");
 const { POLICY_VERSION, OUTCOME, evaluateTaskScopePolicy } = require("./taskScopePolicy");
@@ -11,6 +12,7 @@ const { taskValidator } = require("./taskValidatorRegistry");
 // Shared authenticated confirmation authority. Publication remains a separate
 // command. No caller-supplied policy, source stamp, or derived version is trusted.
 const DRAFT_SCHEMA_VERSION = 3;
+const REVIEWED_DRAFT_SCHEMA_VERSION = 4;
 const COLLECTION = "v2PostingDrafts";
 
 function validRef(value) {
@@ -79,7 +81,7 @@ function receipt(record) {
 }
 
 async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
-  submission, taskSchemaVersion, now = new Date() }) {
+  submission, taskSchemaVersion, confirmationContractVersion, scopeReview, now = new Date() }) {
   if (!db || typeof db.runTransaction !== "function" || !validRef(actorRef) ||
       typeof intentKey !== "string" || intentKey.trim() !== intentKey ||
       intentKey.length < 16 || intentKey.length > 200 ||
@@ -92,8 +94,14 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
   // Schema 1 is retained only to verify/replay existing persisted records.
   if (!validator || !validator.acceptsConfirmation) throw new Error("DRAFT_INPUT_INVALID");
   const content = normalizedSubmission(submission, validator);
+  const reviewed = confirmationContractVersion !== undefined;
+  if (reviewed) {
+    if (confirmationContractVersion !== 2 || content.task_type_id !== "general_cleaning") throw new Error("DRAFT_INPUT_INVALID");
+    verifyScopeReview(content.scope, scopeReview);
+  } else if (scopeReview !== undefined) throw new Error("DRAFT_INPUT_INVALID");
+  const reviewFields = reviewed ? { confirmation_contract_version: 2, scope_review: JSON.parse(JSON.stringify(scopeReview)) } : {};
   const contentDigest = commandPayloadDigest(content);
-  const requestDigest = commandPayloadDigest({ task_schema_version: taskSchemaVersion, submission: content });
+  const requestDigest = commandPayloadDigest({ task_schema_version: taskSchemaVersion, submission: content, ...reviewFields });
   const draftRef = draftRefFor(actorRef, intentKey);
   const ref = db.collection(COLLECTION).doc(draftRef);
   return db.runTransaction(async (tx) => {
@@ -106,7 +114,7 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
     }
     if (prior && prior.draft_version === expectedVersion + 1 &&
         prior.content_digest === contentDigest &&
-        (prior.schema_version === 2 || prior.request_digest === requestDigest)) {
+        ((prior.schema_version === 2 && !reviewed) || prior.request_digest === requestDigest)) {
       await readCurrentConfirmedDraft(tx, db, draftRef, actorRef, prior.draft_version);
       return receipt(prior);
     }
@@ -122,7 +130,7 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
       confirmedFacts: factsForPolicy(content, confirmedAt, validator.schemaVersion) });
     const record = { record_type: "V2_CONFIRMED_POSTING_DRAFT",
       draft_ref: draftRef, owner_ref: actorRef, draft_version: expectedVersion + 1,
-      schema_version: DRAFT_SCHEMA_VERSION, policy_version: POLICY_VERSION,
+      schema_version: reviewed ? REVIEWED_DRAFT_SCHEMA_VERSION : DRAFT_SCHEMA_VERSION, ...reviewFields, policy_version: POLICY_VERSION,
       task_validator_version: validator.validatorVersion,
       text_rule_version: validator.textRuleVersion,
       task_type_id: content.task_type_id, taxonomy_version: content.taxonomy_version,
@@ -155,7 +163,7 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
   if (!record || record.record_type !== "V2_CONFIRMED_POSTING_DRAFT" ||
       record.draft_ref !== draftRef || record.owner_ref !== actorRef ||
       record.draft_version !== expectedVersion ||
-      ![2, DRAFT_SCHEMA_VERSION].includes(record.schema_version) ||
+      ![2, DRAFT_SCHEMA_VERSION, REVIEWED_DRAFT_SCHEMA_VERSION].includes(record.schema_version) ||
       record.policy_version !== POLICY_VERSION ||
       record.taxonomy_version !== TAXONOMY_VERSION ||
       !["UNRESOLVED", "CLEARED_EXACT_TEMPLATE_V1"].includes(record.text_reconciliation_state) ||
@@ -189,9 +197,19 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
     prohibited_scope_codes: record.confirmed_facts.prohibited_scope_codes };
   try { normalizedSubmission(submission, validator); }
   catch { throw new Error("CONFIRMED_DRAFT_UNAVAILABLE"); }
+  let reviewFields = {};
+  if (record.schema_version === REVIEWED_DRAFT_SCHEMA_VERSION) {
+    try {
+      if (record.confirmation_contract_version !== 2) throw new Error();
+      verifyScopeReview(submission.scope, record.scope_review);
+      reviewFields = { confirmation_contract_version: 2, scope_review: record.scope_review };
+    } catch { throw new Error("CONFIRMED_DRAFT_UNAVAILABLE"); }
+  } else if (record.scope_review !== undefined || record.confirmation_contract_version !== undefined) {
+    throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
+  }
   if (record.content_digest !== commandPayloadDigest(submission) ||
-      record.schema_version === DRAFT_SCHEMA_VERSION && record.request_digest !==
-        commandPayloadDigest({ task_schema_version: validator.schemaVersion, submission })) {
+      record.schema_version >= DRAFT_SCHEMA_VERSION && record.request_digest !==
+        commandPayloadDigest({ task_schema_version: validator.schemaVersion, submission, ...reviewFields })) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   const policy = evaluateTaskScopePolicy({ policyVersion: POLICY_VERSION,
