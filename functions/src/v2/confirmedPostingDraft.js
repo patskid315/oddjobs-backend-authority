@@ -89,7 +89,7 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
       !(now instanceof Date) || !Number.isFinite(now.getTime())) {
     throw new Error("DRAFT_AUTHORITY_UNAVAILABLE");
   }
-  const validator = taskValidator(submission && submission.task_type_id,
+  let validator = taskValidator(submission && submission.task_type_id,
     submission && submission.taxonomy_version, taskSchemaVersion);
   // Schema 1 is retained only to verify/replay existing persisted records.
   if (!validator || !validator.acceptsConfirmation) throw new Error("DRAFT_INPUT_INVALID");
@@ -98,6 +98,8 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
   if (reviewed) {
     if (confirmationContractVersion !== 2 || content.task_type_id !== "general_cleaning") throw new Error("DRAFT_INPUT_INVALID");
     verifyScopeReview(content.scope, scopeReview);
+    validator = taskValidator(content.task_type_id, content.taxonomy_version, taskSchemaVersion, "cleaning-text-6");
+    if (!validator) throw new Error("DRAFT_INPUT_INVALID");
   } else if (scopeReview !== undefined) throw new Error("DRAFT_INPUT_INVALID");
   const reviewFields = reviewed ? { confirmation_contract_version: 2, scope_review: JSON.parse(JSON.stringify(scopeReview)) } : {};
   const contentDigest = commandPayloadDigest(content);
@@ -145,7 +147,7 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
       confirmed_facts: factsForPolicy(content, confirmedAt, validator.schemaVersion),
       policy_outcome: policy.outcome, policy_reason_codes: [...policy.reason_codes],
       text_reconciliation_state: policy.outcome === OUTCOME.SUPPORTED &&
-        validator.reconciledText(content) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
+        validator.reconciledText(content, reviewFields) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
       confirmed_at: confirmedAt, updated_at: now,
       created_at: prior ? prior.created_at : now };
     tx.set(ref, record);
@@ -184,7 +186,8 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
   const validator = taskValidator(record.task_type_id, record.taxonomy_version,
     record.confirmed_facts.confirmation.fact_schema_version,
     record.schema_version === 2 ? "cleaning-text-1" : record.text_rule_version);
-  if (!validator || (record.schema_version === 2 ? validator.schemaVersion !== 1 :
+  if (!validator || (record.text_rule_version === "cleaning-text-6" && record.schema_version !== REVIEWED_DRAFT_SCHEMA_VERSION) ||
+      (record.schema_version === 2 ? validator.schemaVersion !== 1 :
     !validator.acceptsConfirmation || record.task_validator_version !== validator.validatorVersion ||
     record.text_rule_version !== validator.textRuleVersion)) throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   const submission = { task_type_id: record.task_type_id,
@@ -218,7 +221,7 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
   if (policy.outcome !== record.policy_outcome ||
       JSON.stringify(policy.reason_codes) !== JSON.stringify(record.policy_reason_codes) ||
       record.text_reconciliation_state !== (policy.outcome === OUTCOME.SUPPORTED &&
-        validator.reconciledText(submission) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED")) {
+        validator.reconciledText(submission, reviewFields) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED")) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   return { draft_ref: draftRef, draft_version: expectedVersion,

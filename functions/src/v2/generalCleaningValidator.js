@@ -137,5 +137,14 @@ function validator(schemaVersion, textRevision = schemaVersion) {
     materialFactsResolved: (scope, risks) => materialFactsResolved(scope, risks, schemaVersion),
     reconciledText: (content) => reconciledText(content, schemaVersion, textRevision) });
 }
-module.exports = { cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3),
+// Shared structured checks for the new reconciliation layer. Historical
+// reconciledText implementations above are intentionally untouched.
+function validReviewedCleaningScope(content) {
+  const scope = { ...content.scope, areas_items: content.scope.areas_items.map((area) => area.trim().toLowerCase()) };
+  return materialFactsResolved(scope, content.risk_facts, 2) &&
+    new Set(scope.areas_items).size === scope.areas_items.length &&
+    scope.areas_items.every((area) => ORDINARY_AREAS.has(area)) && boundedScale(scope) &&
+    (scope.room_count == null || scope.room_count >= scope.areas_items.filter((a) => !["floors", "counters"].includes(a)).length);
+}
+module.exports = { validReviewedCleaningScope, cleaningV1: validator(1), cleaningV2: validator(2), cleaningV2Text3: validator(2, 3),
   cleaningV2Text4: validator(2, 4), cleaningV2Text5: validator(2, 5) };

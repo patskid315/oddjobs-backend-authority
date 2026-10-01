@@ -112,4 +112,22 @@ function interpretGeneralCleaning(input) {
   return advisoryResult(input, output);
 }
 
-module.exports = { interpretGeneralCleaning };
+// Evidence adapter used only by text-6. Advisory version 1 retains its exact
+// parse/output contract above. Extensions consume a complete field and reuse
+// the same room/action parser; they never delete unknown clauses.
+function reconciliationEvidence(text, field) {
+  const tokens = tokenize(text);
+  const withQuantity = (parsed) => parsed && { ...parsed,
+    explicitNumericQuantity: tokens.some((token) => quantity(token.value) !== null) };
+  const existing = parse(text, field);
+  if (existing) return withQuantity(existing);
+  if ([".", "!", "?"].includes(tokens.at(-1)?.value)) tokens.pop();
+  if (tokens.at(-1)?.value === "only") {
+    const parsed = parse(text.slice(0, tokens.at(-1).start), field);
+    const areas = parsed?.proposals.find((p) => p.slot === "areas_items");
+    if (areas && !parsed.extentAssertions.length) return { ...withQuantity(parsed), exclusiveAreas: areas.value };
+  }
+  if (tokens.at(-1)?.value === "cleaning") return withQuantity(target(tokens.slice(0, -1), field));
+  return null;
+}
+module.exports = { interpretGeneralCleaning, reconciliationEvidence };

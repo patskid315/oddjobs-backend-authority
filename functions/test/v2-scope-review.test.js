@@ -54,7 +54,7 @@ test("canonical cross-platform vector, reordered areas, separate safety evidence
   assert.notDeepEqual(review({ ...vector.scope, areas_items: ["bedroom", "bedroom"] }), review(vector.scope));
 });
 
-test("reviewed command records bound provenance and preserves text-5, receipt and exact replay", async () => {
+test("reviewed command records bound provenance and preserves receipt and exact replay", async () => {
   const { args, records, read } = setup(); const command = reviewed(args());
   const receipt = await confirmJobDraft(command);
   assert.equal(receipt.text_reconciliation_state, clear);
@@ -62,7 +62,7 @@ test("reviewed command records bound provenance and preserves text-5, receipt an
   const record = [...records.values()][0];
   assert.equal(record.schema_version, 4); assert.equal(record.confirmation_contract_version, 2);
   assert.deepEqual(record.scope_review, command.scopeReview);
-  assert.equal(record.text_rule_version, "cleaning-text-5");
+  assert.equal(record.text_rule_version, "cleaning-text-6");
   assert.equal(record.owner_ref, "poster-1"); await read(receipt);
   record.scope_review.scope_digest = "0".repeat(64);
   records.set([...records.keys()][0], record);
