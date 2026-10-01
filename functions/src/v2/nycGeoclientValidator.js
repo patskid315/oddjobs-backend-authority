@@ -58,8 +58,15 @@ function exactMatch(body, input) {
       ["boroughCode1In", "lionBoroughCode"].some((k) => result[k] != null && result[k] !== result.bblBoroughCode)) {
     throw failure("LOCATION_VALIDATION_UNRESOLVED");
   }
-  if (normalized(result.houseNumber) !== normalized(input.house_number) ||
-      normalized(result.firstStreetNameNormalized) !== normalized(input.street) || result.zipCode !== input.zip_code) {
+  const houseNumberMatches = normalized(result.houseNumber) === normalized(input.house_number);
+  const normalizedStreetMatches = normalized(result.firstStreetNameNormalized) === normalized(input.street);
+  const zipMatches = result.zipCode === input.zip_code;
+  if (!houseNumberMatches || !normalizedStreetMatches || !zipMatches) {
+    // Temporary E2E diagnostic: never include address values, identifiers or provider evidence.
+    try {
+      console.info(JSON.stringify({ event: "v2_protected_location_exact_match_failed",
+        houseNumberMatches, normalizedStreetMatches, zipMatches }));
+    } catch (_) { /* Observability must not change the authoritative failure. */ }
     throw failure("LOCATION_VALIDATION_UNRESOLVED", "address_not_resolved");
   }
   return { borough: result.bblBoroughCode, reference: `bbl:${result.bbl}` };

@@ -23,6 +23,49 @@ const address = () => ({ address: {
 const json = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { "content-type": "application/json" }
 });
+
+test("temporary mismatch diagnostic contains only event and exact comparison booleans", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  for (const [changes, expected] of [
+    [{ houseNumber: "125" }, [false, true, true]],
+    [{ firstStreetNameNormalized: "OTHER STREET" }, [true, false, true]],
+    [{ zipCode: "10001" }, [true, true, false]],
+    [{ houseNumber: "125", firstStreetNameNormalized: "OTHER STREET", zipCode: "10001" }, [false, false, false]],
+    [{ houseNumber: "125", zipCode: "10001" }, [false, true, false]]
+  ]) {
+    log.mock.resetCalls();
+    const body = address(); Object.assign(body.address, changes);
+    const { validator } = setup([version(), body]);
+    await assert.rejects(validator.validateExactAddress(input, digest), (error) =>
+      error.reason === "address_not_resolved" && error.message === "LOCATION_VALIDATION_UNRESOLVED");
+    assert.equal(log.mock.calls.length, 1);
+    const args = log.mock.calls[0].arguments;
+    assert.equal(args.length, 1);
+    assert.deepEqual(JSON.parse(args[0]), {
+      event: "v2_protected_location_exact_match_failed",
+      houseNumberMatches: expected[0], normalizedStreetMatches: expected[1], zipMatches: expected[2]
+    });
+    for (const privateValue of [...Object.values(input), ...Object.values(changes),
+      credential, JSON.stringify(body), digest, body.address.bbl]) {
+      assert.equal(args[0].includes(privateValue), false);
+    }
+  }
+  log.mock.resetCalls();
+  const success = setup();
+  await success.validator.validateExactAddress(input, digest);
+  assert.equal(log.mock.calls.length, 0);
+  const malformed = setup([version(), {}]);
+  await assert.rejects(malformed.validator.validateExactAddress(input, digest));
+  assert.equal(log.mock.calls.length, 0);
+});
+
+test("diagnostic sink failure preserves the original mismatch reason", async (t) => {
+  t.mock.method(console, "info", () => { throw new Error("sink unavailable"); });
+  const body = address(); body.address.houseNumber = "125";
+  const { validator } = setup([version(), body]);
+  await assert.rejects(validator.validateExactAddress(input, digest), (error) =>
+    error.reason === "address_not_resolved" && error.message === "LOCATION_VALIDATION_UNRESOLVED");
+});
 function setup(responses = [version(), address(), version()], overrides = {}) {
   const calls = [];
   const validator = createNYCGeoclientValidator({ getSubscriptionKey: () => credential,
