@@ -41,3 +41,8 @@ exports.recordV2ProtectedLocation=functions.runWith({
 exports.recordV2SafetyDecision=functions.https.onCall(createSafetyDecisionCallable({
   db:admin.firestore(),HttpsError:functions.https.HttpsError
 }));
+
+// Read-only, authenticated advisory interpretation; no confirmed authority.
+exports.interpretV2GeneralCleaning=functions.https.onCall(require("./src/v2/cleaningInterpretationCallable").createCleaningInterpretationCallable({
+  HttpsError:functions.https.HttpsError
+}));
