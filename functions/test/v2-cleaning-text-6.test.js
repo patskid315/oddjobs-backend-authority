@@ -154,6 +154,7 @@ test("historical revisions 2/3/4/5 and reviewed schema-4 text-5 remain stable on
       const command = validator === cleaningV2Text5 ? reviewed(s.args(value)) : s.args(value);
       const receipt = await confirmJobDraft(command); const record = [...s.records.values()][0];
       record.text_rule_version = validator.textRuleVersion;
+      delete record.clarification; // historical fixture predates clarification receipts
       record.text_reconciliation_state = validator.reconciledText(value) ? clear : "UNRESOLVED";
       const snapshot = structuredClone(record);
       assert.equal((await s.read(receipt)).text_reconciliation_state, snapshot.text_reconciliation_state);

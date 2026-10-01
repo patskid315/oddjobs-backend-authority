@@ -1,0 +1,60 @@
+{
+  "version": 1,
+  "issues": [
+    {
+      "code": "safety_confirmation_required",
+      "field": "safety",
+      "action": "answer_safety_question"
+    },
+    {
+      "code": "cleaning_level_conflict",
+      "field": "cleaning_level",
+      "action": "review_cleaning_level"
+    },
+    {
+      "code": "area_conflict",
+      "field": "areas",
+      "action": "review_areas"
+    },
+    {
+      "code": "scale_conflict",
+      "field": "scale",
+      "action": "review_scale"
+    },
+    {
+      "code": "exclusive_scope_conflict",
+      "field": "scope",
+      "action": "review_scope"
+    },
+    {
+      "code": "whole_scope_unresolved",
+      "field": "scope",
+      "action": "review_scope"
+    },
+    {
+      "code": "additional_scope_unresolved",
+      "field": "scope",
+      "action": "review_job_description"
+    },
+    {
+      "code": "unclassified_scope",
+      "field": "scope",
+      "action": "review_job_description"
+    },
+    {
+      "code": "missing_area",
+      "field": "areas",
+      "action": "select_areas"
+    },
+    {
+      "code": "missing_cleaning_level",
+      "field": "cleaning_level",
+      "action": "select_cleaning_level"
+    },
+    {
+      "code": "missing_scale",
+      "field": "scale",
+      "action": "select_scale"
+    }
+  ]
+}

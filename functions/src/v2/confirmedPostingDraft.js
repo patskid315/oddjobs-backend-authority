@@ -2,6 +2,7 @@
 
 const crypto = require("node:crypto");
 const { verifyScopeReview } = require("./scopeReview");
+const { cleaningClarification } = require("./cleaningClarification");
 const { commandPayloadDigest } = require("./foundation");
 const { TAXONOMY_VERSION } = require("./publicationPrerequisites");
 const { POLICY_VERSION, OUTCOME, evaluateTaskScopePolicy } = require("./taskScopePolicy");
@@ -77,7 +78,8 @@ function receipt(record) {
     confirmed_posting_facts_ref: record.draft_ref,
     draft_version: record.draft_version, policy_outcome: record.policy_outcome,
     policy_version: record.policy_version,
-    text_reconciliation_state: record.text_reconciliation_state });
+    text_reconciliation_state: record.text_reconciliation_state,
+    ...(record.clarification ? { clarification: structuredClone(record.clarification) } : {}) });
 }
 
 async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
@@ -150,6 +152,9 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
         validator.reconciledText(content, reviewFields) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
       confirmed_at: confirmedAt, updated_at: now,
       created_at: prior ? prior.created_at : now };
+    if (validator.textRuleVersion === "cleaning-text-6" && record.text_reconciliation_state === "UNRESOLVED") {
+      record.clarification = cleaningClarification(content, reviewFields);
+    }
     tx.set(ref, record);
     return receipt(record);
   });
@@ -214,6 +219,12 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
       record.schema_version >= DRAFT_SCHEMA_VERSION && record.request_digest !==
         commandPayloadDigest({ task_schema_version: validator.schemaVersion, submission, ...reviewFields })) {
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
+  }
+  if (Object.hasOwn(record, "clarification")) {
+    if (record.text_rule_version !== "cleaning-text-6" || record.text_reconciliation_state !== "UNRESOLVED" ||
+        commandPayloadDigest(record.clarification) !== commandPayloadDigest(cleaningClarification(submission, reviewFields))) {
+      throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
+    }
   }
   const policy = evaluateTaskScopePolicy({ policyVersion: POLICY_VERSION,
     taskTypeId: record.task_type_id, taxonomyVersion: record.taxonomy_version,
