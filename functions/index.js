@@ -46,3 +46,7 @@ exports.recordV2SafetyDecision=functions.https.onCall(createSafetyDecisionCallab
 exports.interpretV2GeneralCleaning=functions.https.onCall(require("./src/v2/cleaningInterpretationCallable").createCleaningInterpretationCallable({
   HttpsError:functions.https.HttpsError
 }));
+
+exports.v2Marketplace=functions.https.onCall(require("./src/v2/marketplace").createMarketplaceCallable({
+  db:admin.firestore(),auth:admin.auth(),HttpsError:functions.https.HttpsError
+}));
