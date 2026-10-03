@@ -37,6 +37,17 @@ function createProtectedLocationCallable({ db, HttpsError,
       return await recordProtectedNYCAddress({ db, authenticatedOwnerRef: uid,
         intentKey: data.intent_key, address, validator, now: new Date() });
     } catch (error) {
+      // Authenticated poster-only advisory result; never a location receipt or write.
+      if (error instanceof ProtectedLocationFailure && error.reason === "address_not_resolved" && error.correction) {
+        const c = error.correction;
+        if (Object.keys(c).sort().join(",") === "house_number,street,zip_code" &&
+            typeof c.house_number === "string" && /^\d+(?:-\d+)?[A-Z]?$/.test(c.house_number) && c.house_number.length <= 24 &&
+            typeof c.street === "string" && c.street.length > 0 && c.street.length <= 160 &&
+            c.street.trim() === c.street && !/[\u0000-\u001f\u007f]/.test(c.street) && /^\d{5}$/.test(c.zip_code)) {
+          return { status: "ADDRESS_CORRECTION_REQUIRED", version: 1,
+            candidate: { house_number: c.house_number, street: c.street, zip_code: c.zip_code } };
+        }
+      }
       const detail = publicDetail(error);
       if (detail.reason === "invalid_address_input") {
         throw new HttpsError("invalid-argument", "Check the address details and try again.", detail);

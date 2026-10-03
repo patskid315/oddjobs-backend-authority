@@ -66,3 +66,33 @@ secret binding and deployment remain separate from local adapter completion.
   `protected location producer|ambiguous, mismatched, unavailable and non-NYC|conflicting concurrent borough`:
   3 passed, 13 unrelated cases skipped by selection.
 - Existing release guard passed; no function export or production inventory changed.
+
+## Explicit poster correction (not location verification)
+
+The maintained guide's `/address` response documents `houseNumber`,
+`firstStreetNameNormalized`, and `zipCode`. Only after the existing Function 1B
+success, echo, BBL/borough consistency and before/after dataset checks pass,
+those fields may supply a representable correction candidate. Normalization,
+provider request construction and exact-match success criteria are unchanged.
+Unrepresentable fields, warnings, ambiguity or inconsistent evidence never
+supply a candidate.
+
+`recordV2ProtectedLocation` may return the additive advisory result:
+
+```json
+{"status":"ADDRESS_CORRECTION_REQUIRED","version":1,"candidate":{"house_number":"123","street":"EXAMPLE STREET","zip_code":"10451"}}
+```
+
+This response is private to the authenticated poster. It contains no unit,
+coordinates, provider evidence, BBL, owner identifier or verification receipt.
+It creates no protected-location record and must never be logged or placed in
+worker projections. Existing exact-match receipts and public errors are unchanged.
+Older clients fail closed on the new non-receipt result.
+
+The iOS ViewModel renders a review sheet with entered/suggested address and
+explicit accept/edit actions. Acceptance preserves the separately entered unit,
+updates editable fields, clears the obsolete attempt and recalculates readiness.
+It does not publish. The next publication action uses a new intent and performs
+full verification again. A repeated correction or deterministic non-match after
+accepting a provider candidate is a service-response defect, not another
+suggestion loop. Candidates and correction state are in memory only.

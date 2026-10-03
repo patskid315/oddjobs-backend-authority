@@ -8,7 +8,8 @@ const now = new Date("2026-10-02T12:00:00Z");
 class HttpsError extends Error { constructor(code, message, details) { super(message); this.code = code; this.details = details; } }
 async function setup() {
   const records = new Map();
-  const collection = (path) => ({ path, doc: (id) => ({ id, path: `${path}/${id}`, collection: (name) => collection(`${path}/${id}/${name}`) }),
+  const collection = (path) => ({ path, doc: (id) => ({ id, path: `${path}/${id}`, collection: (name) => collection(`${path}/${id}/${name}`),
+    get: async () => ({ exists: records.has(`${path}/${id}`), data: () => structuredClone(records.get(`${path}/${id}`)) }) }),
     orderBy: () => ({ path, limit: (limit) => ({ path, limit, startAfter: (after) => ({ path, limit, after }) }) }) });
   const db = { collection, runTransaction: async (work) => {
     const staged = new Map(records);
@@ -41,7 +42,7 @@ async function setup() {
   const callable = createMarketplaceCallable({ db, auth, HttpsError, clock: () => now });
   const call = (data, uid = "worker") => callable(data, uid ? { auth: { uid } } : {});
   const command = { operation: "respond", job_ref: "job", job_version: 1, intent_key: "synthetic-response-key", message: "I am interested." };
-  return { records, call, command, auth };
+  return { records, call, command, auth, db, draftReceipt: receipt };
 }
 const rejected = (promise, reason) => assert.rejects(promise, (e) => e.details.reason === reason);
 
@@ -142,4 +143,41 @@ test("malformed command and incompatible confirmed evidence cannot create respon
   records.get("v2PublishedJobPrivate/job").draft_digest = "changed";
   await rejected(call(command), "job_unavailable");
   assert.equal([...records.values()].filter((r) => r.response_ref).length, 0);
+});
+
+test("actual T01 producer output flows through discovery, response, and owner read without a second job schema", async () => {
+  const { db, auth, records, call, draftReceipt: draft } = await setup();
+  const { recordProtectedNYCAddress, PROVIDER_ID } = require("../src/v2/protectedLocationAuthority");
+  const { publishGeneralCleaningJob, PUBLICATION_POLICY_VERSION } = require("../src/v2/publishOrdinaryJob");
+  const { POLICY_VERSION } = require("../src/v2/taskScopePolicy");
+  const { GEOGRAPHY_REGISTRY_VERSION } = require("../src/v2/publicationPrerequisites");
+  records.delete("v2PublishedJobs/job"); records.delete("v2PublishedJobPrivate/job");
+  const location = await recordProtectedNYCAddress({ db, authenticatedOwnerRef: "poster", intentKey: "actual-publication-location",
+    address: { house_number: "123", street: "Example Street", zip_code: "10451" }, now,
+    validator: { providerId: PROVIDER_ID, validateExactAddress: async (_, digest) => ({ provider_id: PROVIDER_ID,
+      input_digest: digest, status: "EXACT_ADDRESS", dataset_version: "synthetic-1", provider_reference: "synthetic-location",
+      matches: [{ geosupport_return_code: "00", input_match_confirmed: true, borough_code: "2" }] }) } });
+  const command = { record_type: "ORDINARY_JOB_PUBLICATION_COMMAND", publication_idempotency_key: "actual-publication-intent",
+    owner_ref: "poster", draft_ref: draft.draft_ref, draft_version: draft.draft_version,
+    requested_discovery_visibility: "MARKETPLACE_OPEN", hire_again_relationship_ref: null,
+    task_type_id: "general_cleaning", taxonomy_version: "2", confirmed_posting_facts_ref: draft.confirmed_posting_facts_ref,
+    eligibility_geography: location.eligibility_geography, protected_fulfillment_location_ref: location.protected_ref,
+    poster_offer: { pricing_mode: "FIXED", poster_entered_amount_minor: 5000, currency: "USD", pricing_policy_version: null, pricing_provenance: "POSTER_ENTERED" },
+    policy_versions: { publication: PUBLICATION_POLICY_VERSION, task_scope: POLICY_VERSION, geography: GEOGRAPHY_REGISTRY_VERSION }, client_contract_version: 1 };
+  const published = await publishGeneralCleaningJob({ db, auth, authContext: { uid: "poster" }, command,
+    controls: { enabled: true, max_open_jobs: 2, max_daily_publications: 2 }, now });
+  const result = await call({ operation: "browse", cursor: null });
+  assert.equal(result.jobs.length, 1);
+  const job = result.jobs[0]; const raw = records.get(`v2PublishedJobs/${published.job_ref}`);
+  assert.equal(job.job_ref, published.job_ref); assert.equal(job.job_version, raw.job_version);
+  assert.equal(raw.owner_ref, "poster"); assert.equal(raw.job_lifecycle_state, "PUBLISHED_OPEN");
+  assert.deepEqual(job.schedule, raw.schedule_window); assert.equal(job.duration_minutes, raw.duration_minutes);
+  assert.equal(job.borough_id, raw.eligibility_geography.borough_id);
+  assert.equal(job.offer.amount_minor, raw.poster_offer.poster_entered_amount_minor);
+  assert.equal(job.published_at, raw.published_at); assert.deepEqual(job.scope.areas_items, ["bedroom"]);
+  const response = await call({ operation: "respond", job_ref: job.job_ref, job_version: job.job_version,
+    intent_key: "actual-t01-response-intent", message: "Interested" });
+  const received = await call({ operation: "responses", job_ref: job.job_ref, cursor: null }, "poster");
+  assert.deepEqual(received.responses, [response.response]);
+  assert.equal(raw.financial_state, "NOT_REQUIRED_YET");
 });

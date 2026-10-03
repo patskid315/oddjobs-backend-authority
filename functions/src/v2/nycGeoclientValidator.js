@@ -67,7 +67,14 @@ function exactMatch(body, input) {
       console.info(JSON.stringify({ event: "v2_protected_location_exact_match_failed",
         houseNumberMatches, normalizedStreetMatches, zipMatches }));
     } catch (_) { /* Observability must not change the authoritative failure. */ }
-    throw failure("LOCATION_VALIDATION_UNRESOLVED", "address_not_resolved");
+    const candidate = { house_number: normalized(result.houseNumber),
+      street: normalized(result.firstStreetNameNormalized), zip_code: result.zipCode };
+    // Only representable structured candidates; never expose provider evidence.
+    if (!/^\d+(?:-\d+)?[A-Z]?$/.test(candidate.house_number) || candidate.house_number.length > 24 ||
+        candidate.street.length > 160 || /[\u0000-\u001f\u007f]/.test(candidate.street)) {
+      throw failure("LOCATION_VALIDATION_UNRESOLVED", "address_not_resolved");
+    }
+    return { correction: candidate };
   }
   return { borough: result.bblBoroughCode, reference: `bbl:${result.bbl}` };
 }
@@ -158,6 +165,11 @@ function createNYCGeoclientValidator({
         }), input);
         const after = versionEvidence(await getJSON("version"));
         if (before.digest !== after.digest) throw failure("LOCATION_VALIDATION_UNRESOLVED");
+        if (match.correction) {
+          const error = failure("LOCATION_VALIDATION_UNRESOLVED", "address_not_resolved");
+          error.correction = Object.freeze(match.correction);
+          throw error;
+        }
         return { provider_id: PROVIDER_ID, input_digest: inputDigest, status: "EXACT_ADDRESS",
           dataset_version: before.dataset, provider_reference: match.reference,
           matches: [{ geosupport_return_code: "00", input_match_confirmed: true,

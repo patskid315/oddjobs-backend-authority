@@ -72,10 +72,29 @@ Deploy only `functions:v2Marketplace` to an explicitly chosen project when autho
 No new secret or environment variable is introduced. Do not deploy other functions.
 Use two authenticated enabled accounts; the worker needs current audited safety
 clearance through the existing operator path. Poster A publishes through T01.
-Worker B opens Open cleaning jobs, loads details, and submits interest. Reopen the
-detail to confirm the existing response. Poster A opens their cleaning jobs and the
-job's responses. Verify one response, safe projection, and absence of selection or
+Worker B opens the existing Explore feed (or House chores category), opens the
+corresponding job card, and submits interest. Reopen the detail to confirm the
+existing response. Poster A opens My Jobs, then the corresponding active job card
+to view its responses. Verify one response, safe projection, and absence of selection or
 payment actions. No production seed writes are part of implementation/testing.
 
 Out of scope: selection, funding, assignment, work, completion, settlement, payout,
 reviews, notifications, proactive matching, profiles, Android and Web.
+
+## Existing app integration
+
+V2 projections reuse the existing job card alongside legacy jobs in Explore and
+My Jobs; there is no cleaning-specific top-level destination. General Cleaning
+uses House chores. The client filters its loaded V2 pages by search and borough;
+legacy job fetching and filtering remain unchanged. Neighborhood authority is not
+activated: borough-only V2 jobs retain the legacy search behavior for a missing
+neighborhood, so their presence is not evidence of a selected neighborhood match.
+Favorites retain the existing card's local toggle behavior. No persistent favorites
+capability is introduced. Additional pages remain explicitly loadable.
+
+The focused marketplace test now invokes the actual T01 draft, protected-location,
+and publication producers before discovery, worker response, and owner response
+read. It verifies the emitted job/version, schedule, coarse geography, offer,
+confirmed scope, timestamps and pre-payment state rather than substituting a
+second publication fixture schema. This is local contract evidence, not deployment
+or production E2E evidence.

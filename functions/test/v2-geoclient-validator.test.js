@@ -35,7 +35,7 @@ test("temporary mismatch diagnostic contains only event and exact comparison boo
   ]) {
     log.mock.resetCalls();
     const body = address(); Object.assign(body.address, changes);
-    const { validator } = setup([version(), body]);
+    const { validator } = setup([version(), body, version()]);
     await assert.rejects(validator.validateExactAddress(input, digest), (error) =>
       error.reason === "address_not_resolved" && error.message === "LOCATION_VALIDATION_UNRESOLVED");
     assert.equal(log.mock.calls.length, 1);
@@ -62,7 +62,7 @@ test("temporary mismatch diagnostic contains only event and exact comparison boo
 test("diagnostic sink failure preserves the original mismatch reason", async (t) => {
   t.mock.method(console, "info", () => { throw new Error("sink unavailable"); });
   const body = address(); body.address.houseNumber = "125";
-  const { validator } = setup([version(), body]);
+  const { validator } = setup([version(), body, version()]);
   await assert.rejects(validator.validateExactAddress(input, digest), (error) =>
     error.reason === "address_not_resolved" && error.message === "LOCATION_VALIDATION_UNRESOLVED");
 });
@@ -130,12 +130,12 @@ test("warnings, partial/theoretical matches, changes, missing identity and ambig
   ];
   for (const [key, value] of mutations) {
     const body = address(); body.address[key] = value;
-    const { validator } = setup([version(), body]);
+    const { validator } = setup([version(), body, version()]);
     await assert.rejects(validator.validateExactAddress(input, digest), /LOCATION_VALIDATION_UNRESOLVED/);
   }
   for (const body of [null, {}, { address: [address().address] },
     { ...address(), results: [address().address] }]) {
-    const { validator } = setup([version(), body]);
+    const { validator } = setup([version(), body, version()]);
     await assert.rejects(validator.validateExactAddress(input, digest), /LOCATION_VALIDATION_UNRESOLVED/);
   }
 });
@@ -226,7 +226,7 @@ test("typed adapter reasons distinguish non-match, invalid evidence and service 
   const noMatch = address(); noMatch.address.geosupportReturnCode = "42";
   const inconsistent = address(); inconsistent.address.houseNumberIn = "999";
   for (const [responses, reason] of [
-    [[version(), mismatch], "address_not_resolved"],
+    [[version(), mismatch, version()], "address_not_resolved"],
     [[version(), noMatch], "invalid_service_response"],
     [[version(), inconsistent], "invalid_service_response"],
     [[version(), {}], "invalid_service_response"],
@@ -251,4 +251,21 @@ test("typed adapter reasons distinguish non-match, invalid evidence and service 
   const invalid = setup();
   await assert.rejects(invalid.validator.validateExactAddress({ ...input, street: "" }, digest), (error) => error.reason === "invalid_address_input");
   await assert.rejects(invalid.validator.validateExactAddress(input, "wrong-digest"), (error) => error.reason === "invalid_service_response");
+});
+
+ test("qualified correction is minimal, version-pinned, never a receipt", async () => {
+  const body = address(); body.address.firstStreetNameNormalized = "EXAMPLE AVENUE";
+  const { validator } = setup([version(), body, version()]);
+  await assert.rejects(validator.validateExactAddress(input, digest), error => {
+    assert.deepEqual(error.correction, { house_number: "123", street: "EXAMPLE AVENUE", zip_code: "10451" });
+    return error.reason === "address_not_resolved";
+  });
+  const changed = version(); changed.geosupportVersion.release = "26C";
+  await assert.rejects(setup([version(), body, changed]).validator.validateExactAddress(input, digest), error => {
+    assert.equal(error.correction, undefined); return error.reason === "invalid_service_response";
+  });
+  body.address.houseNumber = "not representable";
+  await assert.rejects(setup([version(), body]).validator.validateExactAddress(input, digest), error => {
+    assert.equal(error.correction, undefined); return error.reason === "address_not_resolved";
+  });
 });

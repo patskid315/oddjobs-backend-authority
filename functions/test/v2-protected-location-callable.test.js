@@ -187,3 +187,21 @@ test("address defects are distinct from command, intent and unexpected failures"
     assert.ok(!JSON.stringify(error).includes("PRIVATE")); return true;
   });
 });
+
+ test("authenticated correction response is minimum private advisory data and never persisted", async () => {
+  const { ProtectedLocationFailure } = require("../src/v2/protectedLocationErrors");
+  const candidate = { house_number: "123", street: "EXAMPLE AVENUE", zip_code: "10451" };
+  const fixture = setup(async () => {
+    const error = new ProtectedLocationFailure("address_not_resolved"); error.correction = candidate; throw error;
+  });
+  assert.deepEqual(await fixture.handler(request(), context), {
+    status: "ADDRESS_CORRECTION_REQUIRED", version: 1, candidate
+  });
+  assert.equal(fixture.records.size, 0);
+  await assert.rejects(fixture.handler(request(), {}), code("unauthenticated"));
+  candidate.providerBody = "PRIVATE";
+  await assert.rejects(fixture.handler(request(), context), error => {
+    assert.deepEqual(error.details, { domain: "v2_protected_location", version: 1, reason: "address_not_resolved" });
+    return true;
+  });
+});
