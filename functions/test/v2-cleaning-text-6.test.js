@@ -81,7 +81,7 @@ test("required reviewed-refinement matrix and deterministic bounded reasons", as
     assert.deepEqual(reconcileReviewedCleaning(value, p), reconcileReviewedCleaning(value, p));
     const s = setup(); const result = await confirmJobDraft(reviewed(s.args(value)));
     assert.equal(result.text_reconciliation_state, reason === "COMPATIBLE" ? clear : "UNRESOLVED", value.description);
-    const record = [...s.records.values()][0]; assert.equal(record.text_rule_version, "cleaning-text-7");
+    const record = [...s.records.values()][0]; assert.equal(record.text_rule_version, "cleaning-text-8");
     assert.equal(record.title, original.title); assert.equal(record.description, original.description);
     assert.equal(record.content_digest, commandPayloadDigest(original));
     assert.equal(record.text_digest, commandPayloadDigest({ title: original.title, description: original.description, additional_info: "" }));
@@ -144,7 +144,7 @@ test("only verified contract-v2 review can obtain text-6; no authority from prop
   }
   const fresh = await confirmJobDraft(reviewed({ ...s.args(value), expectedVersion: 1 }));
   assert.equal(fresh.text_reconciliation_state, clear); assert.equal(fresh.draft_version, 2);
-  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-7");
+  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-8");
 });
 
 test("historical revisions 2/3/4/5 and reviewed schema-4 text-5 remain stable on reads and exact retries", async () => {
@@ -162,7 +162,7 @@ test("historical revisions 2/3/4/5 and reviewed schema-4 text-5 remain stable on
       assert.deepEqual([...s.records.values()][0], snapshot);
       const next = await confirmJobDraft(reviewed({ ...s.args(value), expectedVersion: 1 }));
       assert.equal(next.text_reconciliation_state, clear);
-      assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-7");
+      assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-8");
     }
   }
 });
@@ -188,7 +188,7 @@ test("text-7 resolves bounded room ambiguity only through explicitly reviewed sc
       const receipt = await confirmJobDraft(command);
       assert.equal(receipt.text_reconciliation_state, clear);
       const record = [...s.records.values()][0];
-      assert.equal(record.text_rule_version, "cleaning-text-7");
+      assert.equal(record.text_rule_version, "cleaning-text-8");
       assert.equal(record.description, description);
       assert.equal(record.content_digest, commandPayloadDigest(value));
       assert.deepEqual(record.scope_review, review(value.scope));
@@ -228,5 +228,32 @@ test("historical text-6 generic room rejection, clarification and exact retry do
   assert.deepEqual([...s.records.values()][0], snapshot);
   const reconfirmed = await confirmJobDraft({ ...command, expectedVersion: 1 });
   assert.equal(reconfirmed.text_reconciliation_state, clear);
-  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-7");
+  assert.equal([...s.records.values()][0].text_rule_version, "cleaning-text-8");
+});
+
+test("text-8 tolerance still requires reviewed facts, safety and original text provenance", async () => {
+  for (const description of ["need somone to deep cleen my bedroom", "Can someone clean my apartment?",
+    "my place needs a good cleaning", "Please clean my kitchen and bathroom", "Need help cleaning after a party"]) {
+    const areas = description.includes("kitchen") ? ["kitchen","bathroom"] : ["bedroom"];
+    const value = example(description, areas, "DEEP", areas.length === 2 ? "2 rooms" : "1 room", "General cleaning");
+    const s = setup(); const command = reviewed(s.args(value)); const receipt = await confirmJobDraft(command);
+    assert.equal(receipt.text_reconciliation_state, clear, description);
+    const record = [...s.records.values()][0];assert.equal(record.text_rule_version,"cleaning-text-8");
+    assert.equal(record.description,description);assert.equal(record.content_digest,commandPayloadDigest(value));
+    assert.deepEqual(await confirmJobDraft(command),receipt);await s.read(receipt);
+    // A prior text-7 record remains unresolved under its recorded revision.
+    const {cleaningV2Text7} = require("../src/v2/generalCleaningReconciliationV6");
+    const {cleaningClarification} = require("../src/v2/cleaningClarification");
+    assert.equal(cleaningV2Text7.reconciledText(value,provenance(value)),false);
+    record.text_rule_version="cleaning-text-7";record.text_reconciliation_state="UNRESOLVED";
+    record.clarification=cleaningClarification(value,provenance(value),"cleaning-text-7");
+    const prior=structuredClone(record);
+    assert.equal((await confirmJobDraft(command)).text_reconciliation_state,"UNRESOLVED");
+    assert.deepEqual([...s.records.values()][0],prior);
+    assert.equal((await confirmJobDraft({...command,expectedVersion:1})).text_reconciliation_state,clear);
+  }
+  const value=example("Please deep clean my bedroom",["bedroom"],"STANDARD");
+  const s=setup();assert.equal((await confirmJobDraft(reviewed(s.args(value)))).text_reconciliation_state,"UNRESOLVED");
+  value.scope.cleaning_level="DEEP";value.risk_facts.hazardous_materials="UNKNOWN";
+  const unsafe=setup();assert.equal((await confirmJobDraft(reviewed(unsafe.args(value)))).text_reconciliation_state,"UNRESOLVED");
 });

@@ -96,3 +96,22 @@ It does not publish. The next publication action uses a new intent and performs
 full verification again. A repeated correction or deterministic non-match after
 accepting a provider candidate is a service-response defect, not another
 suggestion loop. Candidates and correction state are in memory only.
+
+## Numbered-street presentation equivalence
+
+After the existing qualified 1B/echo/borough/BBL evidence checks, comparison may
+collapse a complete numbered street's direction abbreviation, valid ordinal
+suffix, and terminal ST/AVE/RD/BLVD abbreviation. House number and ZIP must still
+agree; before/after dataset consistency still applies. Provider requests, input
+digests, protected persistence and unit exclusion are unchanged. This is not a
+standalone address validator or a general street-alias resolver. Unknown forms,
+name initials, AVENUE S, S STREET and ST MARKS PLACE are not rewritten.
+
+Basis: NYC Geosupport UPG III.2, especially ordinal deletion and contextual
+abbreviation exceptions:
+https://nycplanning.github.io/Geosupport-UPG/chapters/chapterIII/section02/
+
+The iOS formatter is display-only. Accepted correction identity remains separate
+from its editable human presentation; edits release that binding and require a
+new verification. No city/state is inferred. Material corrections still require
+explicit acceptance and subsequent authoritative verification.

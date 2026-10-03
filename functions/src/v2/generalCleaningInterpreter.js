@@ -12,6 +12,37 @@ function tokenize(text) {
   return [...text.matchAll(/[A-Za-z]+|[0-9]+|[^\s]/gu)].map((m) =>
     ({ value: m[0].toLowerCase(), start: m.index, end: m.index + m[0].length }));
 }
+// Derived tokens retain original UTF-16 evidence offsets. No input text is rewritten.
+// Typo repair is limited to one vowel edit in two grammar slots, not arbitrary words.
+function vowelVariant(word, expected) {
+  if (word.length < 5 || word.replace(/[aeiou]/g, "") !== expected.replace(/[aeiou]/g, "")) return false;
+  if (word.length === expected.length) return [...word].filter((c, i) => c !== expected[i]).length === 1;
+  const [longer, shorter] = word.length > expected.length ? [word, expected] : [expected, word];
+  return longer.length === shorter.length + 1 && [...longer].some((c, i) =>
+    /[aeiou]/.test(c) && longer.slice(0, i) + longer.slice(i + 1) === shorter);
+}
+function humanTokens(tokens) {
+  let result = tokens.map(t => ({ ...t }));
+  if (result[0]?.value === "i" && ["'", "’"].includes(result[1]?.value) && ["d", "m"].includes(result[2]?.value)) {
+    result.splice(1, 2, { value: result[2].value === "d" ? "would" : "am", start: result[1].start, end: result[2].end });
+  }
+  if (result[0]?.value === "please") result.shift();
+  while ([".", "!", "?"].includes(result.at(-1)?.value)) result.pop();
+  if (result.at(-1)?.value === "please") {
+    result.pop(); if (result.at(-1)?.value === ",") result.pop();
+  }
+  // Only framing "someone to" and action "clean/cleaning" can be repaired.
+  // Consonants, negation, exclusions, area names, quantities and hazards are untouched.
+  for (let i = 0; i < result.length; i++) {
+    const value = result[i].value;
+    if (result[i + 1]?.value === "to" && vowelVariant(value, "someone")) result[i].value = "someone";
+    else {
+      const matches = ["clean", "cleaning"].filter(word => vowelVariant(value, word));
+      if (matches.length === 1) result[i].value = matches[0];
+    }
+  }
+  return result;
+}
 function evidence(field, tokens, rule) {
   return { field, start: tokens[0].start, end: tokens[tokens.length - 1].end, rule };
 }
@@ -65,9 +96,9 @@ function target(tokens, field, boundedRoom = false) {
   return { proposals, context: [], extentAssertions: [] };
 }
 
-function parse(text, field, boundedRoom = false) {
-  const all = tokenize(text);
-  if (!all.length) return { proposals: [], context: [], extentAssertions: [] };
+function parse(text, field, boundedRoom = false, human = false) {
+  const all = human ? humanTokens(tokenize(text)) : tokenize(text);
+  if (!all.length) return human && tokenize(text).length ? null : { proposals: [], context: [], extentAssertions: [] };
   const tokens = [...all];
   if ([".", "!", "?"].includes(tokens[tokens.length - 1].value)) tokens.pop();
   const sentence = tokens.map((t) => t.value).join(" ");
@@ -75,11 +106,15 @@ function parse(text, field, boundedRoom = false) {
     return { proposals: [], extentAssertions: [], context: sentence.includes("apartment") ?
       [{ dwelling: "apartment", evidence: [evidence(field, tokens, "dwelling_context")] }] : [] };
   }
+  if (human && /^my (place|apartment|home) needs (a )?(good )?cleaning$/.test(sentence)) {
+    return { proposals: [], context: [{ dwelling: "unspecified_dwelling", evidence: [evidence(field, tokens, "dwelling_cleaning_intent")] }], extentAssertions: [] };
+  }
   // Bounded framing is consumed as a prefix, never searched inside unknown prose.
   let index = 0;
   const prefixes = ["i just need someone to", "i need someone to", "need someone to",
     "looking for someone to", "i just need some", "i need some", "i just need", "i need"];
   if (boundedRoom) prefixes.unshift("just need someone to");
+  if (human) prefixes.unshift("i am looking for someone to", "i would like someone to", "i would like", "can someone", "could someone", "need help", "i need help");
   for (const prefix of prefixes) {
     const words = prefix.split(" ");
     if (words.every((word, i) => tokens[i]?.value === word)) { index = words.length; break; }
@@ -92,7 +127,9 @@ function parse(text, field, boundedRoom = false) {
   const actionEnd = index;
   if (["for", "of"].includes(tokens[index]?.value)) index++;
   if (index >= tokens.length) return null;
-  const parsed = target(tokens.slice(index), field, boundedRoom);
+  const remaining = tokens.slice(index);
+  const contextual = human && remaining.map(t => t.value).join(" ") === "after a party";
+  const parsed = contextual ? { proposals: [], context: [], extentAssertions: [] } : target(remaining, field, boundedRoom);
   if (!parsed) return null;
   if (level) parsed.proposals.push({ slot: "cleaning_level", value: level,
     evidence: [evidence(field, tokens.slice(actionStart, actionEnd), "explicit_cleaning_level")] });
@@ -107,8 +144,8 @@ function interpretGeneralCleaning(input) {
   rawInputIdentity(input);
   const output = { proposals: [], unhandled: [], extentAssertions: [], context: [] };
   for (const field of ["title", "description"]) {
-    const direct = parse(input[field], field, true);
-    const extended = direct ? null : reconciliationEvidence(input[field], field, true);
+    const direct = parse(input[field], field, true, true);
+    const extended = direct ? null : reconciliationEvidence(input[field], field, true, true);
     const parsed = direct || (extended?.genericRoom ? extended : null);
     if (!parsed) {
       output.unhandled.push({ field, start: 0, end: input[field].length, reason: "unclassified_content" });
@@ -121,18 +158,18 @@ function interpretGeneralCleaning(input) {
   return advisoryResult(input, output);
 }
 
-// Historical text-6 calls the original parser (boundedRoom=false). New advisory
-// and text-7 enable only the bounded room ambiguity. Extensions consume a complete field and reuse
-// the same room/action parser; they never delete unknown clauses.
-function reconciliationEvidence(text, field, boundedRoom = false) {
+// Historical text-6 uses the original parser; text-7 enables bounded room ambiguity.
+// Only text-8/current advisory enable human-expression normalization. Complete
+// fields must still parse; unknown clauses are never deleted.
+function reconciliationEvidence(text, field, boundedRoom = false, human = false) {
   const tokens = tokenize(text);
   const withQuantity = (parsed) => parsed && { ...parsed,
     explicitNumericQuantity: tokens.some((token) => quantity(token.value) !== null) };
-  const existing = parse(text, field, boundedRoom);
+  const existing = parse(text, field, boundedRoom, human);
   if (existing) return withQuantity(existing);
   if ([".", "!", "?"].includes(tokens.at(-1)?.value)) tokens.pop();
   if (tokens.at(-1)?.value === "only") {
-    const parsed = parse(text.slice(0, tokens.at(-1).start), field, boundedRoom);
+    const parsed = parse(text.slice(0, tokens.at(-1).start), field, boundedRoom, human);
     const areas = parsed?.proposals.find((p) => p.slot === "areas_items");
     if (parsed?.genericRoom) return { ...withQuantity(parsed), exclusiveRoom: true };
     if (areas && !parsed.extentAssertions.length) return { ...withQuantity(parsed), exclusiveAreas: areas.value };

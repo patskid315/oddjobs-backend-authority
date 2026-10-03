@@ -3,7 +3,7 @@
 const { commandPayloadDigest } = require("./foundation");
 const { exactKeys, validText } = require("./confirmedFactValidation");
 
-const INTERPRETATION_VERSION = "general-cleaning-interpretation-2";
+const INTERPRETATION_VERSION = "general-cleaning-interpretation-3";
 const REQUIRED_SLOTS = Object.freeze(["areas_items", "cleaning_level", "approximate_scale"]);
 
 /**

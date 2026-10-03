@@ -269,3 +269,35 @@ test("typed adapter reasons distinguish non-match, invalid evidence and service 
     assert.equal(error.correction, undefined); return error.reason === "address_not_resolved";
   });
 });
+
+test("qualified numbered street representations verify without correction or private diagnostics", async (t) => {
+  const log = t.mock.method(console, "info", () => {});
+  for (const [submitted, resolved] of [["E 95th St", "EAST 95 STREET"], ["w. 3rd st.", "WEST 3 STREET"],
+    ["  N 12th Ave  ".trim(), "NORTH 12 AVENUE"], ["S 21st Rd", "SOUTH 21 ROAD"], ["95th Blvd", "95 BOULEVARD"]]) {
+    const request = { ...input, street: submitted }; const body = address();
+    body.address.streetName1In = submitted; body.address.firstStreetNameNormalized = resolved;
+    const {validator} = setup([version(), body, version()]);
+    const result = await validator.validateExactAddress(request, commandPayloadDigest(request));
+    assert.equal(result.status, "EXACT_ADDRESS");
+  }
+  assert.equal(log.mock.calls.length, 0);
+});
+
+test("NYC identity exceptions, direction changes and material fields still require correction", async (t) => {
+  t.mock.method(console, "info", () => {});
+  for (const [submitted, resolved] of [["AVENUE S", "AVENUE SOUTH"], ["S STREET", "SOUTH STREET"],
+    ["ABRAHAM E KAZAN STREET", "ABRAHAM EAST KAZAN STREET"], ["ST MARKS PLACE", "STREET MARKS PLACE"],
+    ["E 95th St", "WEST 95 STREET"], ["E 95th St", "EAST 96 STREET"], ["E 95st St", "EAST 95 STREET"]]) {
+    const request = { ...input, street: submitted }; const body = address();
+    body.address.streetName1In = submitted; body.address.firstStreetNameNormalized = resolved;
+    const {validator} = setup([version(), body, version()]);
+    await assert.rejects(validator.validateExactAddress(request, commandPayloadDigest(request)),
+      e => e.reason === "address_not_resolved" && !!e.correction);
+  }
+  for (const patch of [{houseNumber:"125"},{zipCode:"10001"}]) {
+    const request = {...input, street:"E 95th St"}; const body = address();
+    Object.assign(body.address, {streetName1In:request.street,firstStreetNameNormalized:"EAST 95 STREET"}, patch);
+    await assert.rejects(setup([version(),body,version()]).validator.validateExactAddress(request,commandPayloadDigest(request)),
+      e => e.reason === "address_not_resolved" && !!e.correction);
+  }
+});

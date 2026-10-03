@@ -13,7 +13,7 @@ function roomQuantity(scale) {
 }
 const result = (reason) => Object.freeze({ compatible: reason === "COMPATIBLE", reason });
 
-function reconcileReviewedCleaning(content, provenance, boundedRoom = false) {
+function reconcileReviewedCleaning(content, provenance, boundedRoom = false, human = false) {
   try {
     if (provenance?.confirmation_contract_version !== 2) return result("REVIEW_REQUIRED");
     verifyScopeReview(content.scope, provenance.scope_review);
@@ -24,7 +24,7 @@ function reconcileReviewedCleaning(content, provenance, boundedRoom = false) {
   let hasCleaningIntent = false;
   for (const field of ["title", "description"]) {
     const text = content[field];
-    const parsed = reconciliationEvidence(text, field, boundedRoom);
+    const parsed = reconciliationEvidence(text, field, boundedRoom, human);
     if (!parsed) {
       if (CONTEXT.has(comparison(text))) continue;
       // Preserve earlier complete templates (including scale/supply assertions).
@@ -69,4 +69,6 @@ const cleaningV2Text6 = Object.freeze({ ...cleaningV2Text5, textRuleVersion: "cl
   reconciledText: (content, provenance) => reconcileReviewedCleaning(content, provenance).compatible });
 const cleaningV2Text7 = Object.freeze({ ...cleaningV2Text6, textRuleVersion: "cleaning-text-7",
   reconciledText: (content, provenance) => reconcileReviewedCleaning(content, provenance, true).compatible });
-module.exports = { cleaningV2Text6, cleaningV2Text7, reconcileReviewedCleaning };
+const cleaningV2Text8 = Object.freeze({ ...cleaningV2Text7, textRuleVersion: "cleaning-text-8",
+  reconciledText: (content, provenance) => reconcileReviewedCleaning(content, provenance, true, true).compatible });
+module.exports = { cleaningV2Text6, cleaningV2Text7, cleaningV2Text8, reconcileReviewedCleaning };

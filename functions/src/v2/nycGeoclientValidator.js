@@ -1,5 +1,6 @@
 "use strict";
 
+const { equivalentStreet } = require("./nycStreetIdentity");
 const { commandPayloadDigest } = require("./foundation");
 const { PROVIDER_ID } = require("./protectedLocationAuthority");
 
@@ -59,7 +60,7 @@ function exactMatch(body, input) {
     throw failure("LOCATION_VALIDATION_UNRESOLVED");
   }
   const houseNumberMatches = normalized(result.houseNumber) === normalized(input.house_number);
-  const normalizedStreetMatches = normalized(result.firstStreetNameNormalized) === normalized(input.street);
+  const normalizedStreetMatches = equivalentStreet(input.street, result.firstStreetNameNormalized);
   const zipMatches = result.zipCode === input.zip_code;
   if (!houseNumberMatches || !normalizedStreetMatches || !zipMatches) {
     // Temporary E2E diagnostic: never include address values, identifiers or provider evidence.

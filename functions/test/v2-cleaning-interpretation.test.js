@@ -9,7 +9,7 @@ const value = (result, slot) => result.proposals.find((p) => p.slot === slot)?.v
 
 test("deep clean my bedroom proposes evidenced scope without confirmation or policy authority", () => {
   const raw = input("Deep clean my bedroom"); const result = interpretGeneralCleaning(raw);
-  assert.equal(result.interpretation_version, "general-cleaning-interpretation-2");
+  assert.equal(result.interpretation_version, "general-cleaning-interpretation-3");
   assert.deepEqual(value(result, "areas_items"), ["bedroom"]);
   assert.equal(value(result, "cleaning_level"), "DEEP");
   assert.deepEqual(value(result, "approximate_scale"), { kind: "rooms", quantity: 1, wire_value: "1 room" });
@@ -85,7 +85,7 @@ test("singular and bounded numeric forms produce existing representable room sca
 test("safety-sensitive and unknown material is never silently consumed", () => {
   for (const description of ["Clean mold off my bedroom wall", "Deep clean my bedroom and administer medication",
     "Clean my bedroom except the floor", "Do not clean my bedroom", "Something nice please",
-    "Clean my bedroom and spray for roaches", "Clean my bedroom then move furniture", "Clean my bedroom!!"]) {
+    "Clean my bedroom and spray for roaches", "Clean my bedroom then move furniture"]) {
     const raw = input(description); const result = interpretGeneralCleaning(raw);
     assert.equal(result.ordinary_scope_understood, false);
     assert.deepEqual(result.unhandled_content, [{ field: "description", start: 0, end: description.length, reason: "unclassified_content" }]);
