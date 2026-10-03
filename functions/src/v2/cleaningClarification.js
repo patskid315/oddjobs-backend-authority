@@ -23,7 +23,8 @@ function publicReason(reason) { return Object.hasOwn(REASONS, reason) ? REASONS[
 
 // Diagnostic only, after the existing authority has saved an UNRESOLVED outcome.
 // Never influences policy, text reconciliation, or the confirmation command.
-function cleaningClarification(content, provenance) {
+function cleaningClarification(content, provenance, textRuleVersion = "cleaning-text-6") {
+  const boundedRoom = textRuleVersion === "cleaning-text-7";
   const codes = new Set();
   const scope = content.scope;
   if (RISKS.some((key) => content.risk_facts[key] !== "ABSENT_CONFIRMED") ||
@@ -35,11 +36,11 @@ function cleaningClarification(content, provenance) {
   // evaluation above remains unchanged. This allows two distinct field issues.
   for (const field of ["title", "description"]) {
     const isolated = { ...content, title: "General cleaning", description: "General cleaning", [field]: content[field] };
-    const outcome = reconcileReviewedCleaning(isolated, provenance);
+    const outcome = reconcileReviewedCleaning(isolated, provenance, boundedRoom);
     if (outcome.compatible) continue;
     if (outcome.reason === "STRUCTURED_FACTS_UNRESOLVED") continue;
     if (outcome.reason === "EXPLICIT_CONTRADICTION") {
-      const evidence = reconciliationEvidence(content[field], field);
+      const evidence = reconciliationEvidence(content[field], field, boundedRoom);
       codes.add(evidence?.proposals.some((p) => p.slot === "cleaning_level" && p.value !== scope.cleaning_level) ?
         "cleaning_level_conflict" : "scale_conflict");
     } else if (outcome.reason === "UNCLASSIFIED_MATERIAL_CONTENT") {
@@ -47,7 +48,7 @@ function cleaningClarification(content, provenance) {
       // supplies evidence of an unresolved addition, without classifying its type.
       const segments = content[field].split(/ and /i);
       const addition = content.additional_info === "" && segments.length > 1 && segments.slice(1).some((_, i) =>
-        reconciliationEvidence(segments.slice(0, i + 1).join(" and "), field)?.proposals.some((p) => p.slot === "areas_items"));
+        reconciliationEvidence(segments.slice(0, i + 1).join(" and "), field, boundedRoom)?.proposals.some((p) => p.slot === "areas_items"));
       codes.add(addition ? "additional_scope_unresolved" : "unclassified_scope");
     } else codes.add(publicReason(outcome.reason));
   }

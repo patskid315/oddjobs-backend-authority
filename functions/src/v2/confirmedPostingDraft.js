@@ -100,7 +100,7 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
   if (reviewed) {
     if (confirmationContractVersion !== 2 || content.task_type_id !== "general_cleaning") throw new Error("DRAFT_INPUT_INVALID");
     verifyScopeReview(content.scope, scopeReview);
-    validator = taskValidator(content.task_type_id, content.taxonomy_version, taskSchemaVersion, "cleaning-text-6");
+    validator = taskValidator(content.task_type_id, content.taxonomy_version, taskSchemaVersion, "cleaning-text-7");
     if (!validator) throw new Error("DRAFT_INPUT_INVALID");
   } else if (scopeReview !== undefined) throw new Error("DRAFT_INPUT_INVALID");
   const reviewFields = reviewed ? { confirmation_contract_version: 2, scope_review: JSON.parse(JSON.stringify(scopeReview)) } : {};
@@ -152,8 +152,8 @@ async function confirmJobDraft({ db, actorRef, intentKey, expectedVersion,
         validator.reconciledText(content, reviewFields) ? "CLEARED_EXACT_TEMPLATE_V1" : "UNRESOLVED",
       confirmed_at: confirmedAt, updated_at: now,
       created_at: prior ? prior.created_at : now };
-    if (validator.textRuleVersion === "cleaning-text-6" && record.text_reconciliation_state === "UNRESOLVED") {
-      record.clarification = cleaningClarification(content, reviewFields);
+    if (["cleaning-text-6", "cleaning-text-7"].includes(validator.textRuleVersion) && record.text_reconciliation_state === "UNRESOLVED") {
+      record.clarification = cleaningClarification(content, reviewFields, validator.textRuleVersion);
     }
     tx.set(ref, record);
     return receipt(record);
@@ -191,7 +191,7 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
   const validator = taskValidator(record.task_type_id, record.taxonomy_version,
     record.confirmed_facts.confirmation.fact_schema_version,
     record.schema_version === 2 ? "cleaning-text-1" : record.text_rule_version);
-  if (!validator || (record.text_rule_version === "cleaning-text-6" && record.schema_version !== REVIEWED_DRAFT_SCHEMA_VERSION) ||
+  if (!validator || (["cleaning-text-6", "cleaning-text-7"].includes(record.text_rule_version) && record.schema_version !== REVIEWED_DRAFT_SCHEMA_VERSION) ||
       (record.schema_version === 2 ? validator.schemaVersion !== 1 :
     !validator.acceptsConfirmation || record.task_validator_version !== validator.validatorVersion ||
     record.text_rule_version !== validator.textRuleVersion)) throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
@@ -221,8 +221,8 @@ async function readCurrentConfirmedDraft(tx, db, draftRef, actorRef, expectedVer
     throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
   }
   if (Object.hasOwn(record, "clarification")) {
-    if (record.text_rule_version !== "cleaning-text-6" || record.text_reconciliation_state !== "UNRESOLVED" ||
-        commandPayloadDigest(record.clarification) !== commandPayloadDigest(cleaningClarification(submission, reviewFields))) {
+    if (!["cleaning-text-6", "cleaning-text-7"].includes(record.text_rule_version) || record.text_reconciliation_state !== "UNRESOLVED" ||
+        commandPayloadDigest(record.clarification) !== commandPayloadDigest(cleaningClarification(submission, reviewFields, record.text_rule_version))) {
       throw new Error("CONFIRMED_DRAFT_UNAVAILABLE");
     }
   }

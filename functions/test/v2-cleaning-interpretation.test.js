@@ -9,7 +9,7 @@ const value = (result, slot) => result.proposals.find((p) => p.slot === slot)?.v
 
 test("deep clean my bedroom proposes evidenced scope without confirmation or policy authority", () => {
   const raw = input("Deep clean my bedroom"); const result = interpretGeneralCleaning(raw);
-  assert.equal(result.interpretation_version, "general-cleaning-interpretation-1");
+  assert.equal(result.interpretation_version, "general-cleaning-interpretation-2");
   assert.deepEqual(value(result, "areas_items"), ["bedroom"]);
   assert.equal(value(result, "cleaning_level"), "DEEP");
   assert.deepEqual(value(result, "approximate_scale"), { kind: "rooms", quantity: 1, wire_value: "1 room" });
@@ -137,5 +137,39 @@ test("input contract is bounded and cannot carry confirmed facts or policy autho
     { ...input("Clean my bedroom"), confirmed_facts: {} },
     { ...input("Clean my bedroom"), task_type_id: "other_task" }]) {
     assert.throws(() => rawInputIdentity(bad), /CLEANING_INTERPRETATION_INPUT_INVALID/);
+  }
+});
+
+test("generic room preserves known level/quantity and requests only missing dimensions", () => {
+  for (const description of ["Just need someone to deep clean my room", "Deep clean my room only"]) {
+    const result = interpretGeneralCleaning(input(description, "General cleaning"));
+    assert.equal(value(result, "cleaning_level"), "DEEP");
+    assert.equal(value(result, "approximate_scale").wire_value, "1 room");
+    assert.equal(value(result, "areas_items"), undefined);
+    assert.deepEqual(result.unresolved_required_slots, ["areas_items"]);
+    assert.deepEqual(result.unhandled_content, []);
+    assert.equal(result.ordinary_scope_understood, false);
+    assert.equal(result.proposals.find(p => p.slot === "approximate_scale").evidence[0].rule, "generic_room_quantity");
+  }
+  const simple = interpretGeneralCleaning(input("Clean my room"));
+  assert.deepEqual(simple.unresolved_required_slots, ["areas_items", "cleaning_level"]);
+  assert.equal(value(simple, "approximate_scale").wire_value, "1 room");
+  for (const area of ["bedroom", "bathroom", "kitchen"]) {
+    const result = interpretGeneralCleaning(input(`Deep clean my ${area}`));
+    assert.deepEqual(value(result, "areas_items"), [area]);
+    assert.equal(value(result, "cleaning_level"), "DEEP");
+    assert.equal(value(result, "approximate_scale").wire_value, "1 room");
+    assert.equal(result.ordinary_scope_understood, true);
+  }
+});
+
+test("bounded room ambiguity never drops additional, hazardous or unknown work", () => {
+  for (const description of ["Deep clean my room and fix my sink", "Deep clean my room and remove mold",
+    "Deep clean my room and spray for roaches", "Deep clean my room whenever you can",
+    "Deep clean my room only and administer medication", "Do not deep clean my room"]) {
+    const result = interpretGeneralCleaning(input(description));
+    assert.equal(result.unhandled_content.length, 1);
+    assert.deepEqual(result.proposals, []);
+    assert.equal(result.ordinary_scope_understood, false);
   }
 });

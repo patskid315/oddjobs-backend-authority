@@ -20,13 +20,19 @@ function quantity(word) {
   return /^[1-9][0-9]{0,3}$/.test(word) ? Number(word) : null;
 }
 
-function target(tokens, field) {
+function target(tokens, field, boundedRoom = false) {
   let words = tokens.map((t) => t.value);
   if (["my apartment", "an apartment", "the apartment", "apartment", "my whole apartment",
     "the whole apartment", "whole apartment"].includes(words.join(" "))) {
     return { proposals: [], context: [{ dwelling: "apartment", evidence: [evidence(field, tokens, "dwelling_context")] }],
       extentAssertions: words.includes("whole") ? [{ extent: "whole_apartment",
         evidence: [evidence(field, tokens, "whole_dwelling_extent")] }] : [] };
+  }
+  if (boundedRoom && ["my room", "the room", "a room", "room"].includes(words.join(" "))) {
+    return { proposals: [{ slot: "approximate_scale",
+      value: { kind: "rooms", quantity: 1, wire_value: "1 room" },
+      evidence: [evidence(field, tokens, "generic_room_quantity")] }],
+      context: [], extentAssertions: [], genericRoom: true };
   }
   const groups = []; let start = 0;
   for (let i = 0; i <= tokens.length; i++) {
@@ -59,7 +65,7 @@ function target(tokens, field) {
   return { proposals, context: [], extentAssertions: [] };
 }
 
-function parse(text, field) {
+function parse(text, field, boundedRoom = false) {
   const all = tokenize(text);
   if (!all.length) return { proposals: [], context: [], extentAssertions: [] };
   const tokens = [...all];
@@ -73,6 +79,7 @@ function parse(text, field) {
   let index = 0;
   const prefixes = ["i just need someone to", "i need someone to", "need someone to",
     "looking for someone to", "i just need some", "i need some", "i just need", "i need"];
+  if (boundedRoom) prefixes.unshift("just need someone to");
   for (const prefix of prefixes) {
     const words = prefix.split(" ");
     if (words.every((word, i) => tokens[i]?.value === word)) { index = words.length; break; }
@@ -85,7 +92,7 @@ function parse(text, field) {
   const actionEnd = index;
   if (["for", "of"].includes(tokens[index]?.value)) index++;
   if (index >= tokens.length) return null;
-  const parsed = target(tokens.slice(index), field);
+  const parsed = target(tokens.slice(index), field, boundedRoom);
   if (!parsed) return null;
   if (level) parsed.proposals.push({ slot: "cleaning_level", value: level,
     evidence: [evidence(field, tokens.slice(actionStart, actionEnd), "explicit_cleaning_level")] });
@@ -100,7 +107,9 @@ function interpretGeneralCleaning(input) {
   rawInputIdentity(input);
   const output = { proposals: [], unhandled: [], extentAssertions: [], context: [] };
   for (const field of ["title", "description"]) {
-    const parsed = parse(input[field], field);
+    const direct = parse(input[field], field, true);
+    const extended = direct ? null : reconciliationEvidence(input[field], field, true);
+    const parsed = direct || (extended?.genericRoom ? extended : null);
     if (!parsed) {
       output.unhandled.push({ field, start: 0, end: input[field].length, reason: "unclassified_content" });
     } else {
@@ -112,22 +121,23 @@ function interpretGeneralCleaning(input) {
   return advisoryResult(input, output);
 }
 
-// Evidence adapter used only by text-6. Advisory version 1 retains its exact
-// parse/output contract above. Extensions consume a complete field and reuse
+// Historical text-6 calls the original parser (boundedRoom=false). New advisory
+// and text-7 enable only the bounded room ambiguity. Extensions consume a complete field and reuse
 // the same room/action parser; they never delete unknown clauses.
-function reconciliationEvidence(text, field) {
+function reconciliationEvidence(text, field, boundedRoom = false) {
   const tokens = tokenize(text);
   const withQuantity = (parsed) => parsed && { ...parsed,
     explicitNumericQuantity: tokens.some((token) => quantity(token.value) !== null) };
-  const existing = parse(text, field);
+  const existing = parse(text, field, boundedRoom);
   if (existing) return withQuantity(existing);
   if ([".", "!", "?"].includes(tokens.at(-1)?.value)) tokens.pop();
   if (tokens.at(-1)?.value === "only") {
-    const parsed = parse(text.slice(0, tokens.at(-1).start), field);
+    const parsed = parse(text.slice(0, tokens.at(-1).start), field, boundedRoom);
     const areas = parsed?.proposals.find((p) => p.slot === "areas_items");
+    if (parsed?.genericRoom) return { ...withQuantity(parsed), exclusiveRoom: true };
     if (areas && !parsed.extentAssertions.length) return { ...withQuantity(parsed), exclusiveAreas: areas.value };
   }
-  if (tokens.at(-1)?.value === "cleaning") return withQuantity(target(tokens.slice(0, -1), field));
+  if (tokens.at(-1)?.value === "cleaning") return withQuantity(target(tokens.slice(0, -1), field, boundedRoom));
   return null;
 }
 module.exports = { interpretGeneralCleaning, reconciliationEvidence };

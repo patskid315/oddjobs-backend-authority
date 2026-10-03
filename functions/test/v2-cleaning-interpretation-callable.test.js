@@ -11,7 +11,7 @@ test("authenticated exact advisory input only",async()=>{
 });
 test("deterministic versioned result without authority, copied prose or database side effects",async()=>{
  const context={auth:{uid:"poster"}},a=await call(input,context);
- assert.deepEqual(a,await call(input,context));assert.equal(a.interpretation_version,"general-cleaning-interpretation-1");
+ assert.deepEqual(a,await call(input,context));assert.equal(a.interpretation_version,"general-cleaning-interpretation-2");
  assert.equal(a.kind,"GENERAL_CLEANING_ADVISORY");assert.equal(a.requires_explicit_confirmation,true);
  assert.equal(a.policy_outcome,undefined);assert.equal(a.confirmed_facts,undefined);
  assert.ok(!JSON.stringify(a).includes(input.description));assert.ok(!JSON.stringify(a).includes("poster"));
