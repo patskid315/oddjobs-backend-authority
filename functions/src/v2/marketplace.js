@@ -6,6 +6,7 @@ const { readCurrentConfirmedCleaningDraft } = require("./confirmedPostingDraft")
 const { exactKeys, validText } = require("./confirmedFactValidation");
 const { readMarketplacePhotos } = require("./jobPhotoAuthority");
 const POLICY = "OJNY-V2-GOV-1.0.0/worker-request-1";
+const { selectResponse, readSelection, selectionProjection } = require("./provisionalSelection");
 const PAGE = 20;
 class MarketplaceFailure extends Error {
   constructor(reason) { super(reason); this.reason = reason; }
@@ -25,12 +26,13 @@ async function requestStanding(tx, db, auth, actorRef, now) {
   return evidence.provenance;
 }
 
-async function projectJob(tx, db, job, now, storage, renderMedia = true) {
+async function projectJob(tx, db, job, now, storage, renderMedia = true, ownerRead = false) {
+  const pending = ownerRead && job?.job_lifecycle_state === "SELECTION_PENDING_FUNDING";
   if (!job || job.record_type !== "V2_ORDINARY_PUBLISHED_JOB" || !id(job.job_ref) || !id(job.owner_ref) ||
-      job.job_lifecycle_state !== "PUBLISHED_OPEN" || job.discovery_visibility !== "MARKETPLACE_OPEN" ||
+      (!pending && job.job_lifecycle_state !== "PUBLISHED_OPEN") || job.discovery_visibility !== "MARKETPLACE_OPEN" ||
       job.task_type_id !== "general_cleaning" || job.taxonomy_version !== 2 ||
       !Number.isSafeInteger(job.job_version) || job.job_version < 1 ||
-      !Number.isFinite(Date.parse(job.schedule_window?.end_at)) || Date.parse(job.schedule_window.end_at) <= now.getTime()) fail("job_unavailable");
+      !Number.isFinite(Date.parse(job.schedule_window?.end_at)) || (!pending && Date.parse(job.schedule_window.end_at) <= now.getTime())) fail("job_unavailable");
   const privateJob = await record(tx, db, "v2PublishedJobPrivate", job.job_ref);
   if (!privateJob || privateJob.owner_ref !== job.owner_ref || privateJob.job_ref !== job.job_ref) fail("job_unavailable");
   let draft;
@@ -51,7 +53,8 @@ async function projectJob(tx, db, job, now, storage, renderMedia = true) {
       !["HOURLY", "FIXED"].includes(job.poster_offer?.pricing_mode) || job.poster_offer.currency !== "USD" ||
       !Number.isSafeInteger(job.poster_offer.poster_entered_amount_minor) || job.poster_offer.poster_entered_amount_minor < 0) fail("job_unavailable");
   const media = renderMedia ? await readMarketplacePhotos(tx, db, job, storage, now) : undefined;
-  return { ...(media === undefined ? {} : { media }), job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
+  const selection = ownerRead ? await readSelection(tx, db, job, fail) : null;
+  return { ...(selection ? { selection: selectionProjection(selection) } : {}), ...(media === undefined ? {} : { media }), job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
     borough_id: job.eligibility_geography.borough_id,
     schedule: { start_at: draft.schedule_window.start_at, end_at: draft.schedule_window.end_at, time_zone: draft.schedule_window.time_zone },
     duration_minutes: draft.duration_minutes,
@@ -72,10 +75,13 @@ const responseId = (job, worker) => commandPayloadDigest(["v2-worker-response-1"
 function validate(data) {
   const keys = { browse: ["operation", "cursor"], posted: ["operation", "cursor"],
     detail: ["operation", "job_ref"], responses: ["operation", "job_ref", "cursor"],
+    select: ["operation", "job_ref", "job_version", "response_ref", "intent_key"],
     respond: ["operation", "job_ref", "job_version", "intent_key", "message"] };
   if (!data || !Object.hasOwn(keys, data.operation) || !exactKeys(data, keys[data.operation]) ||
       (Object.hasOwn(data, "cursor") && data.cursor !== null && !id(data.cursor)) ||
       (Object.hasOwn(data, "job_ref") && !id(data.job_ref)) ||
+      (data.operation === "select" && (!Number.isSafeInteger(data.job_version) || data.job_version < 1 ||
+        !id(data.response_ref) || !id(data.intent_key) || data.intent_key.length < 16)) ||
       (data.operation === "respond" && (!Number.isSafeInteger(data.job_version) || data.job_version < 1 ||
         !id(data.intent_key) || data.intent_key.length < 16 || !validText(data.message, 1000, true)))) fail("invalid_request");
 }
@@ -105,7 +111,7 @@ function createMarketplaceCallable({ db, auth, storage, HttpsError, clock = () =
             if ((op === "posted") !== (job.owner_ref === uid)) continue;
             try {
               if (op === "browse") await requestStanding(tx, db, auth, job.owner_ref, now);
-              jobs.push(await projectJob(tx, db, job, now, storage));
+              jobs.push(await projectJob(tx, db, job, now, storage, true, op === "posted"));
             } catch (e) {
               if (!(e instanceof MarketplaceFailure) || !["job_unavailable", "eligibility_unavailable", "not_permitted"].includes(e.reason)) throw e;
             }
@@ -114,15 +120,24 @@ function createMarketplaceCallable({ db, auth, storage, HttpsError, clock = () =
         }
         const job = await record(tx, db, "v2PublishedJobs", data.job_ref);
         if (!job || job.job_ref !== data.job_ref) fail("job_unavailable");
+        if (op === "select") {
+          const selection = await selectResponse({ tx, db, job, command: data, uid, now, fail, responseId,
+            standing: (actor) => requestStanding(tx, db, auth, actor, now),
+            validateOpenJob: () => projectJob(tx, db, job, now, storage, false) });
+          return { schema_version: 1, selection };
+        }
         if (op === "detail" && job.owner_ref === uid) {
-          return { schema_version: 1, job: await projectJob(tx, db, job, now, storage), response: null };
+          return { schema_version: 1, job: await projectJob(tx, db, job, now, storage, true, true), response: null };
         }
         if (op === "responses") {
           if (job.owner_ref !== uid) fail("not_permitted");
           let query = db.collection("v2PublishedJobs").doc(data.job_ref).collection("responses").orderBy("__name__").limit(PAGE);
           if (data.cursor) query = query.startAfter(data.cursor);
           const page = await tx.get(query);
-          return { schema_version: 1, responses: page.docs.map((s) => responseProjection(s.data())), next_cursor: page.docs.length === PAGE ? page.docs.at(-1).id : null };
+          const selection = await readSelection(tx, db, job, fail);
+          const selectedResponse = selection ? await record(tx, db, `v2PublishedJobs/${job.job_ref}/responses`, selection.response_ref) : null;
+          return { schema_version: 1, selection: selection ? selectionProjection(selection) : null,
+            selected_response: selectedResponse ? responseProjection(selectedResponse) : null, responses: page.docs.map((s) => responseProjection(s.data())), next_cursor: page.docs.length === PAGE ? page.docs.at(-1).id : null };
         }
         if (job.owner_ref === uid) fail("not_permitted");
         const provenance = await requestStanding(tx, db, auth, uid, now);

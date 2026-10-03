@@ -33,7 +33,7 @@ async function setup() {
   const receipt = await confirmJobDraft({ db, actorRef: "poster", intentKey: "synthetic-confirmation-key", expectedVersion: 0, taskSchemaVersion: 2, submission, now });
   const draft = await db.runTransaction((tx) => readCurrentConfirmedCleaningDraft(tx, db, receipt.draft_ref, "poster", receipt.draft_version));
   records.set("v2PublishedJobs/job", { record_type: "V2_ORDINARY_PUBLISHED_JOB", job_ref: "job", owner_ref: "poster", job_version: 1,
-    job_lifecycle_state: "PUBLISHED_OPEN", discovery_visibility: "MARKETPLACE_OPEN", task_type_id: "general_cleaning", taxonomy_version: 2,
+    job_lifecycle_state: "PUBLISHED_OPEN", job_lifecycle_version: 2, financial_state: "NOT_REQUIRED_YET", financial_state_version: 2, discovery_visibility: "MARKETPLACE_OPEN", task_type_id: "general_cleaning", taxonomy_version: 2,
     title: "PRIVATE PROSE", description: "PRIVATE PROSE", schedule_window: submission.schedule_window,
     eligibility_geography: { borough_id: "nyc:borough:bronx" }, poster_offer: { pricing_mode: "FIXED", poster_entered_amount_minor: 5000, currency: "USD" },
     task_scope_policy_version: draft.policy_version, published_at: now.toISOString(), exact_address: "PRIVATE" });
@@ -179,6 +179,10 @@ test("actual T01 producer output flows through discovery, response, and owner re
     intent_key: "actual-t01-response-intent", message: "Interested" });
   const received = await call({ operation: "responses", job_ref: job.job_ref, cursor: null }, "poster");
   assert.deepEqual(received.responses, [response.response]);
+  const selection = await call({ operation: "select", job_ref: job.job_ref, job_version: job.job_version,
+    response_ref: response.response.response_ref, intent_key: "actual-t01-selection-intent" }, "poster");
+  const selectedRead = await call({ operation: "responses", job_ref: job.job_ref, cursor: null }, "poster");
+  assert.deepEqual(selectedRead.selection, selection.selection);
   assert.equal(raw.financial_state, "NOT_REQUIRED_YET");
 });
 
@@ -292,4 +296,60 @@ test("photo finalization → protected location → T01 publication → browse/d
     intent_key: "photo-worker-response", message: "Interested" }, { auth: { uid: "worker" } });
   assert.equal(response.response.status, "SUBMITTED");
   assert.equal(f.bucket.objects.size, 2);
+});
+
+async function selectionSetup() {
+  const f = await setup();
+  const response = (await f.call(f.command)).response;
+  return { ...f, select: { operation: "select", job_ref: "job", job_version: 1,
+    response_ref: response.response_ref, intent_key: "synthetic-selection-key" } };
+}
+test("poster selection is provisional, idempotent, private, reloadable, and closes worker discovery", async () => {
+  const f = await selectionSetup();
+  const result = await f.call(f.select, "poster");
+  assert.deepEqual(await f.call(f.select, "poster"), result);
+  assert.equal(result.selection.job_lifecycle_state, "SELECTION_PENDING_FUNDING");
+  assert.equal(result.selection.financial_state, "FUNDING_REQUIRED");
+  assert.equal(result.selection.assignment_created, false); assert.equal(result.selection.job_version, 2);
+  assert.equal(f.records.get("v2ProvisionalSelections/job").worker_ref, "worker");
+  assert.equal(f.records.get("v2PublishedJobs/job").job_version, 2);
+  assert.equal((await f.call({ operation: "browse", cursor: null })).jobs.length, 0);
+  const posted = await f.call({ operation: "posted", cursor: null }, "poster");
+  assert.deepEqual(posted.jobs[0].selection, result.selection);
+  const read = await f.call({ operation: "responses", job_ref: "job", cursor: null }, "poster");
+  assert.deepEqual(read.selection, result.selection); assert.equal(read.selected_response.response_ref, f.select.response_ref);
+  assert.equal(read.responses.length, 1);
+  assert.deepEqual((await f.call({ operation: "detail", job_ref: "job" }, "poster")).job.selection, result.selection);
+  for (const key of ["worker_ref", "poster_ref", "standing_provenance", "command_digest"]) assert.ok(!JSON.stringify(read).includes(key));
+  assert.equal([...f.records.keys()].filter((k) => k.startsWith("v2ProvisionalSelections/")).length, 1);
+  assert.ok(![...f.records.values()].some((v) => v.record_type === "ORDINARY_JOB_FUNDING_ATTEMPT" || v.record_type === "ORDINARY_JOB_ASSIGNMENT_RECEIPT"));
+});
+test("selection rejects forged identities, nonowner, wrong job, nonexistent response, stale version and changed command", async () => {
+  const f = await selectionSetup();
+  await rejected(f.call(f.select, null), "authentication_required");
+  await rejected(f.call(f.select, "worker"), "not_permitted");
+  await rejected(f.call(f.select, "other"), "not_permitted");
+  for (const extra of [{ worker_ref: "worker" }, { owner_ref: "poster" }]) await rejected(f.call({ ...f.select, ...extra }, "poster"), "invalid_request");
+  await rejected(f.call({ ...f.select, job_ref: "missing" }, "poster"), "job_unavailable");
+  await rejected(f.call({ ...f.select, job_version: 2 }, "poster"), "job_changed");
+  await rejected(f.call({ ...f.select, response_ref: "missing" }, "poster"), "response_unavailable");
+  const response = f.records.get(`v2PublishedJobs/job/responses/${f.select.response_ref}`);
+  for (const patch of [{ job_ref: "another-job" }, { worker_ref: "poster" }, { job_version: 2 }, { status: "WITHDRAWN" }, { decision: { outcome: "INELIGIBLE" } }]) {
+    f.records.set(`v2PublishedJobs/job/responses/${f.select.response_ref}`, { ...response, ...patch });
+    await rejected(f.call(f.select, "poster"), "response_unavailable");
+  }
+  f.records.set(`v2PublishedJobs/job/responses/${f.select.response_ref}`, response);
+  await f.call(f.select, "poster");
+  await rejected(f.call({ ...f.select, response_ref: "different" }, "poster"), "request_conflict");
+  await rejected(f.call({ ...f.select, intent_key: "different-selection-key" }, "poster"), "already_selected");
+});
+test("current safety and expired job block new selection without modifying responses", async () => {
+  const f = await selectionSetup();
+  f.records.get("v2Safety/worker").state = "BLOCKED";
+  await assert.rejects(f.call(f.select, "poster"));
+  assert.equal(f.records.has("v2ProvisionalSelections/job"), false);
+  f.records.get("v2Safety/worker").state = "CLEAR";
+  f.records.get("v2PublishedJobs/job").schedule_window.end_at = "2020-01-01T00:00:00Z";
+  await rejected(f.call(f.select, "poster"), "job_unavailable");
+  assert.equal(f.records.get(`v2PublishedJobs/job/responses/${f.select.response_ref}`).status, "SUBMITTED");
 });
