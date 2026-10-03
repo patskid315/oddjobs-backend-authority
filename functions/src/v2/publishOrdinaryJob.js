@@ -8,6 +8,8 @@ const { TAXONOMY_VERSION, GEOGRAPHY_REGISTRY_VERSION,
 const { POLICY_VERSION, OUTCOME } = require("./taskScopePolicy");
 const { readCurrentConfirmedCleaningDraft } = require("./confirmedPostingDraft");
 
+const { readPublicationPhotos, validateRefs } = require("./jobPhotoAuthority");
+
 const PUBLICATION_POLICY_VERSION = "OJNY-V2-GOV-1.0.0/free-publication-1";
 const JOBS = "v2PublishedJobs";
 const PRIVATE = "v2PublishedJobPrivate";
@@ -35,6 +37,7 @@ function validateCommand(command, actorRef) {
     "task_type_id", "taxonomy_version", "confirmed_posting_facts_ref",
     "eligibility_geography", "protected_fulfillment_location_ref", "poster_offer",
     "policy_versions", "client_contract_version"];
+  if (command && Object.hasOwn(command, "media")) { keys.push("media"); validateRefs(command.media); }
   const offer = command && command.poster_offer;
   if (!exact(command, keys) || command.record_type !== "ORDINARY_JOB_PUBLICATION_COMMAND" ||
       command.owner_ref !== actorRef || !ref(actorRef) || !ref(command.draft_ref) ||
@@ -108,6 +111,7 @@ async function publishGeneralCleaningJob({ db, auth, authContext, command, contr
       if (commandPayloadDigest(command.eligibility_geography) !== commandPayloadDigest(geography)) {
         throw new Error("PUBLICATION_GEOGRAPHY_CONFLICT");
       }
+      const photos = await readPublicationPhotos(tx, db, command.media, actorRef, command.draft_ref);
       const draftClaimRef = db.collection(DRAFT_CLAIMS).doc(command.draft_ref);
       const draftClaim = await tx.get(draftClaimRef);
       if (draftClaim.exists) throw new Error("PUBLICATION_DUPLICATE_DRAFT");
@@ -136,10 +140,12 @@ async function publishGeneralCleaningJob({ db, auth, authContext, command, contr
         payment_intent_created: false, charge_created: false,
         proactive_notification_authorized: false };
       classifyPublicationRecord(receipt);
+      for (const photo of photos) tx.set(photo.doc, { ...photo.record, state: "PUBLISHED", job_ref: commandId, published_at: publishedAt });
       tx.create(db.collection(JOBS).doc(commandId), {
         record_type: "V2_ORDINARY_PUBLISHED_JOB", job_ref: commandId,
         owner_ref: actorRef, ...INITIAL_PUBLICATION_STATE,
         discovery_visibility: "MARKETPLACE_OPEN", job_version: 1,
+        ...(command.media === undefined ? {} : { media: command.media }),
         task_type_id: "general_cleaning", taxonomy_version: TAXONOMY_VERSION,
         title: draft.title, description: draft.description,
         duration_minutes: draft.duration_minutes,

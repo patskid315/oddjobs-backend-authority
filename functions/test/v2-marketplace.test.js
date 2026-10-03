@@ -181,3 +181,115 @@ test("actual T01 producer output flows through discovery, response, and owner re
   assert.deepEqual(received.responses, [response.response]);
   assert.equal(raw.financial_state, "NOT_REQUIRED_YET");
 });
+
+function photoBucket() {
+  const objects = new Map(); let generation = 100;
+  return { objects, file(path, options = {}) {
+    const value = () => {
+      const object = objects.get(path);
+      if (!object || (options.generation && options.generation !== object.generation)) throw Object.assign(new Error("missing"), { code: 404 });
+      return object;
+    };
+    return {
+      exists: async () => [objects.has(path)],
+      getMetadata: async () => { const v = value(); return [{ generation: v.generation, size: v.bytes.length, contentType: v.type }]; },
+      download: async () => [Buffer.from(value().bytes)],
+      save: async (bytes, config) => {
+        assert.equal(config.preconditionOpts.ifGenerationMatch, 0);
+        if (objects.has(path)) throw Object.assign(new Error("exists"), { code: 412 });
+        objects.set(path, { bytes: Buffer.from(bytes), generation: String(++generation), type: config.metadata.contentType });
+      },
+      getSignedUrl: async (config) => { value(); assert.equal(config.version, "v4"); return [`https://storage.googleapis.com/synthetic/${path}?synthetic=only`]; }
+    };
+  } };
+}
+const jpeg = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);
+async function photoSetup() {
+  const environment = await setup();
+  const authority = require("../src/v2/jobPhotoAuthority");
+  const bucket = photoBucket();
+  bucket.objects.set("job_post_drafts/poster/photo-flow/photo_0.jpg", { bytes: jpeg, generation: "42", type: "image/jpeg" });
+  const storage = authority.storageAdapter(bucket);
+  const request = { schema_version: 1, draft_ref: environment.draftReceipt.draft_ref,
+    draft_version: environment.draftReceipt.draft_version, flow_id: "photo-flow", photos: [{ index: 0, generation: "42" }] };
+  const finalize = (r = request, owner = "poster") => authority.finalizePhotos({ db: environment.db, storage, owner, request: r, now });
+  return { ...environment, authority, bucket, storage, request, finalize };
+}
+
+test("job media finalization freezes owner bytes; draft overwrite/delete and exact retry cannot change identity", async () => {
+  const f = await photoSetup(); const media = await f.finalize(); const ref = media.refs[0];
+  assert.equal(media.schema_version, 1); assert.match(ref, /^[a-f0-9]{64}$/);
+  const path = `v2PublishedJobMedia/${ref}.jpg`;
+  f.bucket.objects.get("job_post_drafts/poster/photo-flow/photo_0.jpg").bytes = Buffer.from("changed");
+  f.bucket.objects.delete("job_post_drafts/poster/photo-flow/photo_0.jpg");
+  assert.deepEqual(await f.finalize(), media);
+  assert.deepEqual(f.bucket.objects.get(path).bytes, jpeg);
+  assert.equal(f.records.get(`v2JobMedia/${ref}`).state, "FINALIZED");
+});
+test("foreign owners, external URLs, arbitrary paths, unsupported metadata, stale generations and excess photos fail closed", async () => {
+  const f = await photoSetup();
+  await assert.rejects(f.finalize(f.request, "worker"));
+  for (const change of [{ source: "https://example.invalid/image.jpg" }, { path: "job_post_drafts/other/x/photo_0.jpg" },
+    { flow_id: "../other" }, { photos: [{ index: 0, generation: "999" }] },
+    { photos: [0, 1, 2, 3].map((index) => ({ index, generation: "42" })) }]) await assert.rejects(f.finalize({ ...f.request, ...change }));
+  f.bucket.objects.get("job_post_drafts/poster/photo-flow/photo_0.jpg").type = "image/png";
+  await assert.rejects(f.finalize());
+  f.bucket.objects.get("job_post_drafts/poster/photo-flow/photo_0.jpg").type = "image/jpeg";
+  f.bucket.objects.get("job_post_drafts/poster/photo-flow/photo_0.jpg").bytes = Buffer.from("not a JPEG");
+  await assert.rejects(f.finalize());
+});
+test("media callable authentication and forged owner are rejected with generic errors", async () => {
+  const f = await photoSetup(); const handler = f.authority.createFinalizePhotosCallable({ ...f, HttpsError });
+  await assert.rejects(handler(f.request, {}), (e) => e.code === "unauthenticated");
+  await assert.rejects(handler({ ...f.request, owner_ref: "poster" }, { auth: { uid: "worker" } }), (e) => e.code === "failed-precondition");
+  assert.deepEqual(await handler(f.request, { auth: { uid: "poster" } }), await f.finalize());
+});
+test("media references reject malformed, unknown, duplicate, foreign, reused, and wrong-draft identities", async () => {
+  const f = await photoSetup(); const media = await f.finalize();
+  const read = (m, owner = "poster", draft = f.request.draft_ref) => f.db.runTransaction((tx) => f.authority.readPublicationPhotos(tx, f.db, m, owner, draft));
+  for (const value of [{ schema_version: 2, refs: [] }, { schema_version: 1, refs: ["https://example.invalid"] },
+    { schema_version: 1, refs: ["a".repeat(64)] }, { ...media, refs: [media.refs[0], media.refs[0]] },
+    { schema_version: 1, refs: ["a", "b", "c", "d"].map((s) => s.repeat(64)) }]) await assert.rejects(read(value));
+  await assert.rejects(read(media, "worker")); await assert.rejects(read(media, "poster", "different-draft"));
+  assert.equal((await read(media)).length, 1); assert.deepEqual(await read(undefined), []);
+  f.records.get(`v2JobMedia/${media.refs[0]}`).state = "PUBLISHED";
+  await assert.rejects(read(media));
+});
+test("photo finalization → protected location → T01 publication → browse/detail/posted carries only safe media and immutable retry", async () => {
+  const f = await photoSetup(); const { db, auth, records, draftReceipt: draft } = f;
+  const media = await f.finalize();
+  const { recordProtectedNYCAddress, PROVIDER_ID } = require("../src/v2/protectedLocationAuthority");
+  const { publishGeneralCleaningJob, PUBLICATION_POLICY_VERSION } = require("../src/v2/publishOrdinaryJob");
+  const { POLICY_VERSION } = require("../src/v2/taskScopePolicy");
+  const { GEOGRAPHY_REGISTRY_VERSION } = require("../src/v2/publicationPrerequisites");
+  records.delete("v2PublishedJobs/job"); records.delete("v2PublishedJobPrivate/job");
+  const location = await recordProtectedNYCAddress({ db, authenticatedOwnerRef: "poster", intentKey: "photo-location-intent",
+    address: { house_number: "123", street: "Example Street", zip_code: "10451" }, now,
+    validator: { providerId: PROVIDER_ID, validateExactAddress: async (_, digest) => ({ provider_id: PROVIDER_ID,
+      input_digest: digest, status: "EXACT_ADDRESS", dataset_version: "synthetic-1", provider_reference: "synthetic-location",
+      matches: [{ geosupport_return_code: "00", input_match_confirmed: true, borough_code: "2" }] }) } });
+  const command = { record_type: "ORDINARY_JOB_PUBLICATION_COMMAND", publication_idempotency_key: "photo-publication-intent",
+    owner_ref: "poster", draft_ref: draft.draft_ref, draft_version: draft.draft_version,
+    requested_discovery_visibility: "MARKETPLACE_OPEN", hire_again_relationship_ref: null,
+    task_type_id: "general_cleaning", taxonomy_version: "2", confirmed_posting_facts_ref: draft.confirmed_posting_facts_ref,
+    eligibility_geography: location.eligibility_geography, protected_fulfillment_location_ref: location.protected_ref,
+    poster_offer: { pricing_mode: "FIXED", poster_entered_amount_minor: 5000, currency: "USD", pricing_policy_version: null, pricing_provenance: "POSTER_ENTERED" },
+    policy_versions: { publication: PUBLICATION_POLICY_VERSION, task_scope: POLICY_VERSION, geography: GEOGRAPHY_REGISTRY_VERSION }, client_contract_version: 1, media };
+  const args = { db, auth, authContext: { uid: "poster" }, command, controls: { enabled: true, max_open_jobs: 2, max_daily_publications: 2 }, now };
+  const receipt = await publishGeneralCleaningJob(args);
+  assert.deepEqual(await publishGeneralCleaningJob(args), receipt);
+  assert.deepEqual(records.get(`v2PublishedJobs/${receipt.job_ref}`).media, media);
+  assert.equal(records.get(`v2JobMedia/${media.refs[0]}`).job_ref, receipt.job_ref);
+  const handler = createMarketplaceCallable({ db, auth, storage: f.storage, HttpsError, clock: () => now });
+  for (const [input, uid] of [[{ operation: "browse", cursor: null }, "worker"], [{ operation: "detail", job_ref: receipt.job_ref }, "worker"], [{ operation: "posted", cursor: null }, "poster"], [{ operation: "detail", job_ref: receipt.job_ref }, "poster"]]) {
+    const result = await handler(input, { auth: { uid } }); const job = result.job || result.jobs[0];
+    assert.equal(job.media.photos[0].media_ref, media.refs[0]);
+    assert.deepEqual(Object.keys(job.media.photos[0]).sort(), ["expires_at", "media_ref", "url"]);
+    for (const forbidden of ["PRIVATE", "owner_ref", "draft_ref", "flow_id", "source_generation", "job_post_drafts", "protected_fulfillment", "Example Street"]) assert.ok(!JSON.stringify(result).includes(forbidden));
+  }
+  const noSigning = createMarketplaceCallable({ db, auth, storage: { presentation: async () => { throw new Error("signer down"); } }, HttpsError, clock: () => now });
+  const response = await noSigning({ operation: "respond", job_ref: receipt.job_ref, job_version: 1,
+    intent_key: "photo-worker-response", message: "Interested" }, { auth: { uid: "worker" } });
+  assert.equal(response.response.status, "SUBMITTED");
+  assert.equal(f.bucket.objects.size, 2);
+});

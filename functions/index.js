@@ -47,6 +47,12 @@ exports.interpretV2GeneralCleaning=functions.https.onCall(require("./src/v2/clea
   HttpsError:functions.https.HttpsError
 }));
 
+const jobPhotos=require("./src/v2/jobPhotoAuthority");
+const jobPhotoStorage=jobPhotos.storageAdapter(admin.storage().bucket());
+exports.finalizeV2JobPhotos=functions.https.onCall(jobPhotos.createFinalizePhotosCallable({
+  db:admin.firestore(),auth:admin.auth(),storage:jobPhotoStorage,HttpsError:functions.https.HttpsError
+}));
+
 exports.v2Marketplace=functions.https.onCall(require("./src/v2/marketplace").createMarketplaceCallable({
-  db:admin.firestore(),auth:admin.auth(),HttpsError:functions.https.HttpsError
+  db:admin.firestore(),auth:admin.auth(),storage:jobPhotoStorage,HttpsError:functions.https.HttpsError
 }));

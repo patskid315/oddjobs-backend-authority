@@ -4,6 +4,7 @@ const { commandPayloadDigest } = require("./foundation");
 const { readCurrentPublicationStanding } = require("./standingSafetyAuthority");
 const { readCurrentConfirmedCleaningDraft } = require("./confirmedPostingDraft");
 const { exactKeys, validText } = require("./confirmedFactValidation");
+const { readMarketplacePhotos } = require("./jobPhotoAuthority");
 const POLICY = "OJNY-V2-GOV-1.0.0/worker-request-1";
 const PAGE = 20;
 class MarketplaceFailure extends Error {
@@ -24,7 +25,7 @@ async function requestStanding(tx, db, auth, actorRef, now) {
   return evidence.provenance;
 }
 
-async function projectJob(tx, db, job, now) {
+async function projectJob(tx, db, job, now, storage, renderMedia = true) {
   if (!job || job.record_type !== "V2_ORDINARY_PUBLISHED_JOB" || !id(job.job_ref) || !id(job.owner_ref) ||
       job.job_lifecycle_state !== "PUBLISHED_OPEN" || job.discovery_visibility !== "MARKETPLACE_OPEN" ||
       job.task_type_id !== "general_cleaning" || job.taxonomy_version !== 2 ||
@@ -49,7 +50,8 @@ async function projectJob(tx, db, job, now) {
       !/^nyc:borough:(manhattan|bronx|brooklyn|queens|staten_island)$/.test(job.eligibility_geography?.borough_id || "") ||
       !["HOURLY", "FIXED"].includes(job.poster_offer?.pricing_mode) || job.poster_offer.currency !== "USD" ||
       !Number.isSafeInteger(job.poster_offer.poster_entered_amount_minor) || job.poster_offer.poster_entered_amount_minor < 0) fail("job_unavailable");
-  return { job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
+  const media = renderMedia ? await readMarketplacePhotos(tx, db, job, storage, now) : undefined;
+  return { ...(media === undefined ? {} : { media }), job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
     borough_id: job.eligibility_geography.borough_id,
     schedule: { start_at: draft.schedule_window.start_at, end_at: draft.schedule_window.end_at, time_zone: draft.schedule_window.time_zone },
     duration_minutes: draft.duration_minutes,
@@ -78,7 +80,7 @@ function validate(data) {
         !id(data.intent_key) || data.intent_key.length < 16 || !validText(data.message, 1000, true)))) fail("invalid_request");
 }
 
-function createMarketplaceCallable({ db, auth, HttpsError, clock = () => new Date() }) {
+function createMarketplaceCallable({ db, auth, storage, HttpsError, clock = () => new Date() }) {
   return async (data, context) => {
     try {
       const uid = context?.auth?.uid;
@@ -103,7 +105,7 @@ function createMarketplaceCallable({ db, auth, HttpsError, clock = () => new Dat
             if ((op === "posted") !== (job.owner_ref === uid)) continue;
             try {
               if (op === "browse") await requestStanding(tx, db, auth, job.owner_ref, now);
-              jobs.push(await projectJob(tx, db, job, now));
+              jobs.push(await projectJob(tx, db, job, now, storage));
             } catch (e) {
               if (!(e instanceof MarketplaceFailure) || !["job_unavailable", "eligibility_unavailable", "not_permitted"].includes(e.reason)) throw e;
             }
@@ -112,6 +114,9 @@ function createMarketplaceCallable({ db, auth, HttpsError, clock = () => new Dat
         }
         const job = await record(tx, db, "v2PublishedJobs", data.job_ref);
         if (!job || job.job_ref !== data.job_ref) fail("job_unavailable");
+        if (op === "detail" && job.owner_ref === uid) {
+          return { schema_version: 1, job: await projectJob(tx, db, job, now, storage), response: null };
+        }
         if (op === "responses") {
           if (job.owner_ref !== uid) fail("not_permitted");
           let query = db.collection("v2PublishedJobs").doc(data.job_ref).collection("responses").orderBy("__name__").limit(PAGE);
@@ -132,7 +137,7 @@ function createMarketplaceCallable({ db, auth, HttpsError, clock = () => new Dat
           fail("already_responded");
         }
         const posterProvenance = await requestStanding(tx, db, auth, job.owner_ref, now);
-        const projection = await projectJob(tx, db, job, now);
+        const projection = await projectJob(tx, db, job, now, storage, op === "detail");
         if (op === "detail") return { schema_version: 1, job: projection, response: previous ? responseProjection(previous) : null };
         if (data.job_version !== job.job_version) fail("job_changed");
         const decision = { record_type: "MATCHING_DECISION", decision_id: ref.id, job_ref: job.job_ref, worker_ref: uid,
