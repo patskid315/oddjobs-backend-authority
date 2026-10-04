@@ -162,7 +162,7 @@ test("actual T01 producer output flows through discovery, response, and owner re
     requested_discovery_visibility: "MARKETPLACE_OPEN", hire_again_relationship_ref: null,
     task_type_id: "general_cleaning", taxonomy_version: "2", confirmed_posting_facts_ref: draft.confirmed_posting_facts_ref,
     eligibility_geography: location.eligibility_geography, protected_fulfillment_location_ref: location.protected_ref,
-    poster_offer: { pricing_mode: "FIXED", poster_entered_amount_minor: 5000, currency: "USD", pricing_policy_version: null, pricing_provenance: "POSTER_ENTERED" },
+    poster_offer: { pricing_mode: "HOURLY", poster_entered_amount_minor: 5000, currency: "USD", pricing_policy_version: null, pricing_provenance: "POSTER_ENTERED" },
     policy_versions: { publication: PUBLICATION_POLICY_VERSION, task_scope: POLICY_VERSION, geography: GEOGRAPHY_REGISTRY_VERSION }, client_contract_version: 1 };
   const published = await publishGeneralCleaningJob({ db, auth, authContext: { uid: "poster" }, command,
     controls: { enabled: true, max_open_jobs: 2, max_daily_publications: 2 }, now });
@@ -184,6 +184,17 @@ test("actual T01 producer output flows through discovery, response, and owner re
   const selectedRead = await call({ operation: "responses", job_ref: job.job_ref, cursor: null }, "poster");
   assert.deepEqual(selectedRead.selection, selection.selection);
   assert.equal(raw.financial_state, "NOT_REQUIRED_YET");
+  const proposed = await call({ operation: "propose_scope", job_ref: job.job_ref, job_version: selection.selection.job_version,
+    expected_scope_version: 0, maximum_billable_minutes: 90, intent_key: "actual-hourly-proposal" }, "poster");
+  const agreed = await call({ operation: "accept_scope", job_ref: job.job_ref, job_version: selection.selection.job_version,
+    expected_scope_version: proposed.hourly_scope.proposal_version, intent_key: "actual-hourly-acceptance" });
+  assert.equal(agreed.hourly_scope.state, "AGREED");
+  const fundedScope = (await call({ operation: "detail", job_ref: job.job_ref }, "poster")).job;
+  assert.equal(fundedScope.funding_scope_ready, true);
+  assert.equal(fundedScope.hourly_scope.selection_ref, selection.selection.selection_ref);
+  assert.equal(fundedScope.hourly_scope.hourly_rate_minor_per_hour, 5000);
+  assert.equal(records.get(`v2PublishedJobs/${job.job_ref}`).financial_state, "FUNDING_REQUIRED");
+
 });
 
 function photoBucket() {
@@ -352,4 +363,75 @@ test("current safety and expired job block new selection without modifying respo
   f.records.get("v2PublishedJobs/job").schedule_window.end_at = "2020-01-01T00:00:00Z";
   await rejected(f.call(f.select, "poster"), "job_unavailable");
   assert.equal(f.records.get(`v2PublishedJobs/job/responses/${f.select.response_ref}`).status, "SUBMITTED");
+});
+
+async function hourlySetup() {
+  const f = await setup(); f.records.get("v2PublishedJobs/job").poster_offer.pricing_mode = "HOURLY";
+  const response = (await f.call(f.command)).response;
+  await f.call({ operation: "select", job_ref: "job", job_version: 1, response_ref: response.response_ref, intent_key: "hourly-select-command" }, "poster");
+  return { ...f, propose: { operation: "propose_scope", job_ref: "job", job_version: 2,
+    expected_scope_version: 0, maximum_billable_minutes: 90, intent_key: "hourly-propose-command" },
+    accept: { operation: "accept_scope", job_ref: "job", job_version: 2, expected_scope_version: 1, intent_key: "hourly-accept-command" } };
+}
+test("hourly minute policy boundaries and explicit bilateral acceptance", async () => {
+  for (const minutes of [0, -1, 721, 1.5, "60", null]) {
+    const f = await hourlySetup(); await rejected(f.call({ ...f.propose, maximum_billable_minutes: minutes }, "poster"), "invalid_maximum_minutes");
+    assert.equal(f.records.has("v2HourlyScopes/job"), false);
+  }
+  for (const minutes of [1, 719, 720]) {
+    const f = await hourlySetup();
+    assert.equal((await f.call({ operation: "detail", job_ref: "job" }, "poster")).job.funding_scope_ready, false);
+    const command = { ...f.propose, maximum_billable_minutes: minutes };
+    const first = await f.call(command, "poster"); assert.deepEqual(await f.call(command, "poster"), first);
+    assert.equal(first.hourly_scope.maximum_billable_minutes, minutes);
+    const selected = await f.call({ operation: "selected_jobs", cursor: null });
+    assert.equal(selected.jobs.length, 1); assert.equal(selected.jobs[0].selected_for_you, true);
+    for (const key of ["worker_ref", "poster_ref", "standing_provenance", "binding_digest"]) assert.ok(!JSON.stringify(selected).includes(key));
+    const agreed = await f.call(f.accept); assert.deepEqual(await f.call(f.accept), agreed);
+    assert.equal(agreed.hourly_scope.state, "AGREED");
+    assert.deepEqual(await f.call(command, "poster"), first);
+    assert.equal((await f.call({ operation: "detail", job_ref: "job" })).job.funding_scope_ready, true);
+    assert.equal(f.records.get("v2PublishedJobs/job").financial_state, "FUNDING_REQUIRED");
+    assert.equal(f.records.get("v2PublishedJobs/job").job_lifecycle_state, "SELECTION_PENDING_FUNDING");
+    assert.equal([...f.records.keys()].filter(k => k.startsWith("v2HourlyScopes/job/commands/")).length, 2);
+  }
+});
+test("hourly authorization, exact payloads, decline and supersession fail closed", async () => {
+  const f = await hourlySetup();
+  await rejected(f.call(f.propose), "not_permitted");
+  await rejected(f.call(f.propose, "other"), "not_permitted");
+  await rejected(f.call(f.propose, null), "authentication_required");
+  await f.call(f.propose, "poster");
+  await rejected(f.call(f.accept, "other"), "not_permitted");
+  await rejected(f.call(f.accept, "poster"), "not_permitted");
+  await rejected(f.call({ ...f.accept, maximum_billable_minutes: 120 }), "invalid_request");
+  await rejected(f.call({ ...f.propose, worker_ref: "other" }, "poster"), "invalid_request");
+  await rejected(f.call({ ...f.propose, maximum_billable_minutes: 120 }, "poster"), "request_conflict");
+  const next = { ...f.propose, intent_key: "second-proposal-command", expected_scope_version: 1, maximum_billable_minutes: 120 };
+  await f.call(next, "poster");
+  assert.equal(f.records.get("v2HourlyScopes/job/history/1").state, "SUPERSEDED");
+  await rejected(f.call(f.accept), "stale_scope");
+  const declined = { ...f.accept, operation: "decline_scope", expected_scope_version: 2 };
+  assert.equal((await f.call(declined)).hourly_scope.state, "DECLINED");
+  assert.equal((await f.call({ operation: "detail", job_ref: "job" }, "poster")).job.funding_scope_ready, false);
+  await rejected(f.call({ ...f.accept, expected_scope_version: 2 }), "request_conflict");
+  assert.equal(f.records.get("v2ProvisionalSelections/job").state, "PROVISIONAL");
+});
+test("changed controlling facts invalidate hourly agreement; fixed price needs no hourly proposal", async () => {
+  for (const edit of [
+    f => { f.records.get("v2PublishedJobs/job").poster_offer.poster_entered_amount_minor += 1; },
+    f => { f.records.get("v2PublishedJobs/job").job_version += 1; },
+    f => { f.records.get("v2ProvisionalSelections/job").response_ref = "changed-response"; },
+    f => { f.records.get("v2ProvisionalSelections/job").worker_ref = "different-worker"; }
+  ]) {
+    const f = await hourlySetup(); await f.call(f.propose, "poster"); await f.call(f.accept); edit(f);
+    await assert.rejects(f.call(f.accept));
+    try { assert.equal((await f.call({ operation: "detail", job_ref: "job" }, "poster")).job.funding_scope_ready, false); }
+    catch (e) { assert.equal(e.details?.reason, "job_unavailable"); }
+  }
+  const f = await selectionSetup(); await f.call(f.select, "poster");
+  const read = (await f.call({ operation: "detail", job_ref: "job" }, "poster")).job;
+  assert.equal(read.funding_scope_ready, true); assert.equal(read.hourly_scope, undefined);
+  await rejected(f.call({ operation: "propose_scope", job_ref: "job", job_version: 2,
+    expected_scope_version: 0, maximum_billable_minutes: 60, intent_key: "fixed-proposal-invalid" }, "poster"), "hourly_scope_unavailable");
 });

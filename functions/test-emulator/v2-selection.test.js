@@ -67,3 +67,39 @@ test("clients cannot forge or read private selection records directly", async ()
     await assertFails(ref.get()); await assertFails(ref.set({ worker_ref: uid })); await assertFails(ref.delete());
   }
 });
+
+async function hourlyCommands() {
+  await db.doc("v2PublishedJobs/job").update({ "poster_offer.pricing_mode": "HOURLY" });
+  await call(choices[0]);
+  return { propose: { operation: "propose_scope", job_ref: "job", job_version: 2, expected_scope_version: 0,
+    maximum_billable_minutes: 90, intent_key: "hourly-proposal-command" },
+    accept: { operation: "accept_scope", job_ref: "job", job_version: 2, expected_scope_version: 1, intent_key: "hourly-accept-command" } };
+}
+test("concurrent proposal and acceptance retries create one bilateral hourly agreement", async () => {
+  const { propose, accept } = await hourlyCommands();
+  const proposals = await Promise.all([call(propose), call(propose)]);
+  assert.deepEqual(proposals[0], proposals[1]);
+  const accepted = await Promise.all([call(accept, "worker"), call(accept, "worker")]);
+  assert.deepEqual(accepted[0], accepted[1]);
+  assert.equal((await db.collection("v2HourlyScopes").get()).size, 1);
+  assert.equal((await db.collection("v2HourlyScopes/job/commands").get()).size, 2);
+  assert.equal((await call({ operation: "detail", job_ref: "job" }, "worker")).job.funding_scope_ready, true);
+  for (const uid of ["poster", "worker"]) {
+    const client = env.authenticatedContext(uid).firestore();
+    for (const path of ["v2HourlyScopes/job", "v2HourlyScopes/job/history/1", "v2HourlyScopes/job/commands/forged"]) {
+      await assertFails(client.doc(path).get()); await assertFails(client.doc(path).set({ state: "AGREED" }));
+    }
+  }
+});
+test("concurrent different proposals and acceptance versus supersession have a single serialized winner", async () => {
+  const { propose, accept } = await hourlyCommands();
+  const attempts = [propose, { ...propose, maximum_billable_minutes: 120, intent_key: "different-proposal-key" }];
+  const results = await Promise.allSettled(attempts.map(c => call(c)));
+  assert.equal(results.filter(r => r.status === "fulfilled").length, 1);
+  assert.equal(results.find(r => r.status === "rejected").reason.details.reason, "stale_scope");
+  const revise = { ...propose, expected_scope_version: 1, maximum_billable_minutes: 150, intent_key: "superseding-proposal-key" };
+  const race = await Promise.allSettled([call(accept, "worker"), call(revise)]);
+  assert.equal(race.filter(r => r.status === "fulfilled").length, 1);
+  const current = (await db.doc("v2HourlyScopes/job").get()).data();
+  assert.ok((current.version === 1 && current.state === "AGREED") || (current.version === 2 && current.state === "PROPOSED"));
+});
