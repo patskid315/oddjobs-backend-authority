@@ -194,10 +194,13 @@ match /conversations/{conversationID}/messages/{messageID} {
 
     match /users/{userID} {
       allow read: if isSignedIn();
-      allow create: if isSignedIn() && request.auth.uid == userID;
+      allow create: if isSignedIn() && request.auth.uid == userID
+        && request.resource.data.get("onboardingStep", "setupAccount") != "completed";
 
       allow update: if isSignedIn()
         && request.auth.uid == userID
+        && (request.resource.data.get("onboardingStep", "setupAccount") != "completed"
+          || resource.data.get("onboardingStep", "setupAccount") == "completed")
         && (
           (request.resource.data.keys().hasAny(['accountStatus'])
             && request.resource.data.accountStatus == 'deleted')

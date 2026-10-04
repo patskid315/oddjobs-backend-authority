@@ -56,3 +56,10 @@ exports.finalizeV2JobPhotos=functions.https.onCall(jobPhotos.createFinalizePhoto
 exports.v2Marketplace=functions.https.onCall(require("./src/v2/marketplace").createMarketplaceCallable({
   db:admin.firestore(),auth:admin.auth(),storage:jobPhotoStorage,HttpsError:functions.https.HttpsError
 }));
+
+const homeAuthorities=require("./src/v2/homeLocation").createHomeAuthorities({
+  db:admin.firestore(),auth:admin.auth(),HttpsError:functions.https.HttpsError,
+  timestamp:()=>admin.firestore.FieldValue.serverTimestamp()
+});
+exports.v2SavedHomeLocation=functions.https.onCall(homeAuthorities.savedHome);
+exports.finalizeNYCOnboarding=functions.region("us-central1").https.onCall(homeAuthorities.finalize);
