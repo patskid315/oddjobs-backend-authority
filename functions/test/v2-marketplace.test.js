@@ -432,6 +432,9 @@ test("changed controlling facts invalidate hourly agreement; fixed price needs n
   const f = await selectionSetup(); await f.call(f.select, "poster");
   const read = (await f.call({ operation: "detail", job_ref: "job" }, "poster")).job;
   assert.equal(read.funding_scope_ready, true); assert.equal(read.hourly_scope, undefined);
+  f.records.get("v2PublishedJobs/job").financial_state = "FUNDED";
+  const fundedRead = (await f.call({ operation: "detail", job_ref: "job" }, "poster")).job;
+  assert.equal(fundedRead.selection.financial_state, "FUNDED"); assert.equal(fundedRead.selection.assignment_created, false);
   await rejected(f.call({ operation: "propose_scope", job_ref: "job", job_version: 2,
     expected_scope_version: 0, maximum_billable_minutes: 60, intent_key: "fixed-proposal-invalid" }, "poster"), "hourly_scope_unavailable");
 });

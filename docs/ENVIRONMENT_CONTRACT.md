@@ -6,6 +6,16 @@ Observed legacy Runtime Config names: `discord`, `notify.email`, `notify.passwor
 
 Observed Secret Manager names: `GOOGLE_SERVICE_ACCOUNT_JSON`.
 
+V2 funding declares two future Secret Manager bindings by name only:
+
+- `STRIPE_SECRET_KEY`: the Stripe platform API secret for the explicitly selected environment.
+- `STRIPE_WEBHOOK_SECRET`: the signing secret for the dedicated `v2FundingWebhook` endpoint in that same environment.
+
+Both are required server-side and fail closed when missing or malformed. They must
+belong to the same Stripe mode/account; test and live values must never be mixed.
+No value is configured, read from a local file, or committed by this implementation.
+Legacy Runtime Config is not a fallback for V2 funding.
+
 Values are intentionally excluded. Migration must replace legacy Runtime Config with Secret Manager references and least-privilege service identity.
 
 

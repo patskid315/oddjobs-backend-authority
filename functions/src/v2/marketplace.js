@@ -56,7 +56,7 @@ async function projectJob(tx, db, job, now, storage, renderMedia = true, ownerRe
   const media = renderMedia ? await readMarketplacePhotos(tx, db, job, storage, now) : undefined;
   const selection = ownerRead ? await readSelection(tx, db, job, fail) : null;
   const scopeState = selection ? await readScope(tx, db, job, selection) : {};
-  return { ...scopeState, ...(selection ? { selection: selectionProjection(selection) } : {}), ...(media === undefined ? {} : { media }), job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
+  return { ...scopeState, ...(selection ? { selection: selectionProjection(selection, job.financial_state) } : {}), ...(media === undefined ? {} : { media }), job_ref: job.job_ref, job_version: job.job_version, title: "General Cleaning", task_type_id: "general_cleaning",
     borough_id: job.eligibility_geography.borough_id,
     schedule: { start_at: draft.schedule_window.start_at, end_at: draft.schedule_window.end_at, time_zone: draft.schedule_window.time_zone },
     duration_minutes: draft.duration_minutes,
@@ -166,7 +166,7 @@ function createMarketplaceCallable({ db, auth, storage, HttpsError, clock = () =
           const page = await tx.get(query);
           const selection = await readSelection(tx, db, job, fail);
           const selectedResponse = selection ? await record(tx, db, `v2PublishedJobs/${job.job_ref}/responses`, selection.response_ref) : null;
-          return { schema_version: 1, selection: selection ? selectionProjection(selection) : null,
+          return { schema_version: 1, selection: selection ? selectionProjection(selection, job.financial_state) : null,
             selected_response: selectedResponse ? responseProjection(selectedResponse) : null, responses: page.docs.map((s) => responseProjection(s.data())), next_cursor: page.docs.length === PAGE ? page.docs.at(-1).id : null };
         }
         if (job.owner_ref === uid) fail("not_permitted");

@@ -57,6 +57,21 @@ exports.v2Marketplace=functions.https.onCall(require("./src/v2/marketplace").cre
   db:admin.firestore(),auth:admin.auth(),storage:jobPhotoStorage,HttpsError:functions.https.HttpsError
 }));
 
+const Stripe=require("stripe");
+const {StripeFundingProvider,secretStripe}=require("./src/v2/stripeFundingProvider");
+const fundingProvider=()=>{const configured=secretStripe({Stripe,key:process.env.STRIPE_SECRET_KEY});
+  return new StripeFundingProvider({stripe:configured.stripe,db:admin.firestore(),livemode:configured.livemode});};
+exports.v2Funding=functions.runWith({secrets:["STRIPE_SECRET_KEY"]}).https.onCall(
+  require("./src/v2/fundingCallable").createFundingCallable({db:admin.firestore(),auth:admin.auth(),
+    providerFactory:fundingProvider,HttpsError:functions.https.HttpsError}));
+
+const {FirestoreStripeEventRepository}=require("./src/webhooks/firestoreStripeEventRepository");
+const {createFundingWebhookHandler,createFundingWebhookHttp}=require("./src/v2/fundingWebhook");
+exports.v2FundingWebhook=functions.runWith({secrets:["STRIPE_SECRET_KEY","STRIPE_WEBHOOK_SECRET"]}).https.onRequest(
+  createFundingWebhookHttp({handlerFactory:()=>{const configured=secretStripe({Stripe,key:process.env.STRIPE_SECRET_KEY});
+    return createFundingWebhookHandler({stripe:configured.stripe,webhookSecret:process.env.STRIPE_WEBHOOK_SECRET,
+      eventRepository:new FirestoreStripeEventRepository({db:admin.firestore(),collection:"v2StripeEvents"}),db:admin.firestore()});}}));
+
 const homeAuthorities=require("./src/v2/homeLocation").createHomeAuthorities({
   db:admin.firestore(),auth:admin.auth(),HttpsError:functions.https.HttpsError,
   timestamp:()=>admin.firestore.FieldValue.serverTimestamp()

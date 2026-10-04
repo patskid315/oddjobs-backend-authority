@@ -31,6 +31,17 @@ async function readScope(tx, db, job, selection) {
   return { hourly_scope_revision: record?.version || 0, hourly_scope: current ? project(record) : null,
     funding_scope_ready: validMoney && offer?.pricing_mode === "HOURLY" && Boolean(agreed) };
 }
+async function readAgreedScope(tx, db, job, selection, fail) {
+  if (job.poster_offer?.pricing_mode !== "HOURLY") return null;
+  const snap = await tx.get(db.collection("v2HourlyScopes").doc(job.job_ref));
+  const record = snap.exists ? snap.data() : null;
+  if (!record || !matches(record, job, selection) || record.state !== "AGREED" ||
+      record.poster_confirmation?.actor_ref !== job.owner_ref || record.poster_confirmation?.proposal_version !== record.version ||
+      record.worker_confirmation?.actor_ref !== selection.worker_ref || record.worker_confirmation?.proposal_version !== record.version) {
+    fail("hourly_scope_unavailable");
+  }
+  return record;
+}
 async function mutateScope({ tx, db, job, selection, command, uid, now, fail }) {
   const propose = command.operation === "propose_scope";
   if (!selection || (propose ? uid !== job.owner_ref : uid !== selection.worker_ref)) fail("not_permitted");
@@ -68,4 +79,4 @@ async function mutateScope({ tx, db, job, selection, command, uid, now, fail }) 
   tx.create(commandRef, { command_digest: digest(command), proposal_version: next.version, result: project(next) });
   return project(next);
 }
-module.exports = { POLICY, validMinutes, readScope, mutateScope };
+module.exports = { POLICY, validMinutes, readScope, readAgreedScope, mutateScope };

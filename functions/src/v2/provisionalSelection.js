@@ -3,11 +3,11 @@ const { commandPayloadDigest } = require("./foundation");
 const COLLECTION = "v2ProvisionalSelections";
 const POLICY = "OJNY-V2-GOV-1.0.0/provisional-selection-1";
 
-function projection(record) {
+function projection(record, financialState = "FUNDING_REQUIRED") {
   return { schema_version: 1, selection_ref: record.selection_ref, job_ref: record.job_ref,
     response_ref: record.response_ref, source_job_version: record.source_job_version,
     job_version: record.job_version, intent_key: record.intent_key,
-    job_lifecycle_state: "SELECTION_PENDING_FUNDING", financial_state: "FUNDING_REQUIRED",
+    job_lifecycle_state: "SELECTION_PENDING_FUNDING", financial_state: financialState,
     assignment_created: false, selected_at: record.selected_at };
 }
 async function readSelection(tx, db, job, fail) {
@@ -22,7 +22,7 @@ async function readSelection(tx, db, job, fail) {
       !Number.isSafeInteger(record.source_job_version) || record.source_job_version < 1 ||
       !Number.isFinite(Date.parse(record.selected_at)) || record.poster_ref !== job.owner_ref || record.job_ref !== job.job_ref ||
       record.job_version !== job.job_version || job.job_lifecycle_state !== "SELECTION_PENDING_FUNDING" ||
-      job.financial_state !== "FUNDING_REQUIRED" || record.state !== "PROVISIONAL" ||
+      !["FUNDING_REQUIRED", "PROCESSING", "UNKNOWN", "FUNDED"].includes(job.financial_state) || record.state !== "PROVISIONAL" ||
       record.job_version !== record.source_job_version + 1) fail("job_unavailable");
   return record;
 }

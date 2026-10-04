@@ -7,6 +7,7 @@ const { initializeTestEnvironment, assertFails } = require("@firebase/rules-unit
 const { createMarketplaceCallable } = require("../src/v2/marketplace");
 const { confirmJobDraft, readCurrentConfirmedCleaningDraft } = require("../src/v2/confirmedPostingDraft");
 const { recordSafetyDecision } = require("../src/v2/standingSafetyAuthority");
+const { createOrReuseAttempt, claimPreparation } = require("../src/v2/fundingAuthority");
 const now = new Date("2026-10-02T12:00:00Z");
 class HttpsError extends Error { constructor(code, message, details) { super(message); this.code = code; this.details = details; } }
 let env, app, db, call, choices;
@@ -102,4 +103,26 @@ test("concurrent different proposals and acceptance versus supersession have a s
   assert.equal(race.filter(r => r.status === "fulfilled").length, 1);
   const current = (await db.doc("v2HourlyScopes/job").get()).data();
   assert.ok((current.version === 1 && current.state === "AGREED") || (current.version === 2 && current.state === "PROPOSED"));
+});
+test("concurrent funding preparation creates one private obligation and clients cannot access financial authority", async () => {
+  await call(choices[0]);
+  const command = { operation: "quote", job_ref: "job", job_version: 2, intent_key: "funding-obligation-command" };
+  const prepare = () => createOrReuseAttempt({ db, uid: "poster", command, now, validateStanding: async () => {} });
+  const results = await Promise.all([prepare(), prepare()]);
+  assert.equal(results[0].record.attempt_id, results[1].record.attempt_id);
+  assert.equal((await db.collection("v2FundingObligations").get()).size, 1);
+  assert.equal((await db.collection("v2FundingObligations/job/commands").get()).size, 1);
+  const claims = await Promise.all(["lease-one", "lease-two"].map(leaseId => claimPreparation({ db, jobRef: "job",
+    attemptId: results[0].record.attempt_id, leaseId, now })));
+  assert.equal(claims.filter(result => result.acquired).length, 1);
+  assert.equal((await db.doc("v2PublishedJobs/job").get()).data().financial_state, "FUNDING_REQUIRED");
+  for (const uid of ["poster", "worker"]) {
+    const client = env.authenticatedContext(uid).firestore();
+    for (const path of ["v2FundingObligations/job", "v2FundingObligations/job/commands/forged",
+      "v2StripeCustomers/poster", "v2StripeEvents/evt_synthetic"]) {
+      await assertFails(client.doc(path).get()); await assertFails(client.doc(path).set({ state: "FUNDED" }));
+    }
+  }
+  assert.equal((await db.collection("assignments").get()).size, 0);
+  assert.equal((await db.collection("payments").get()).size, 0);
 });
